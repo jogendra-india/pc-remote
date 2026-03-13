@@ -890,43 +890,76 @@ canvas.addEventListener("touchend", (e) => {
 }, { passive: false });
 
 // ===== Keyboard =====
+// Helper: merge physical event modifiers with sticky (virtual keyboard) modifiers
+function buildModList(e) {
+  const allMods = [];
+  if (e.ctrlKey  || mods.ctrl)  allMods.push("ctrl");
+  if (e.altKey   || mods.alt)   allMods.push("alt");
+  if (e.metaKey  || mods.cmd)   allMods.push("cmd");
+  if (e.shiftKey || mods.shift) allMods.push("shift");
+  return allMods;
+}
+
+// Canvas keyboard handler — also applies sticky modifiers
 function handleKeyDown(e) {
   if (!isConnected) return;
   if ($("settings-overlay").classList.contains("open")) return;
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-  e.preventDefault();
-  socket.emit("keydown", { key: e.key, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey });
-}
-canvas.addEventListener("keydown", handleKeyDown);
-
-// NKB (native keyboard) handler — applies sticky modifiers from the Keys panel
-$("kb-input").addEventListener("keydown", (e) => {
-  if (!isConnected) return;
-  e.preventDefault();
-  e.stopPropagation();
   if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
+  e.preventDefault();
 
-  // Merge physical modifiers with sticky modifiers
-  const useCtrl = e.ctrlKey || mods.ctrl;
-  const useAlt = e.altKey || mods.alt;
-  const useMeta = e.metaKey || mods.cmd;
-  const useShift = e.shiftKey || mods.shift;
-  const allMods = [];
-  if (useCtrl) allMods.push("ctrl");
-  if (useAlt) allMods.push("alt");
-  if (useMeta) allMods.push("cmd");
-  if (useShift) allMods.push("shift");
+  const allMods = buildModList(e);
+  const hadSticky = mods.ctrl || mods.alt || mods.cmd || mods.shift;
 
   if (allMods.length > 0) {
     socket.emit("hotkey", { modifiers: allMods, key: e.key });
-    releaseMods();
+    if (hadSticky) releaseMods();
+  } else {
+    socket.emit("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
+  }
+}
+canvas.addEventListener("keydown", handleKeyDown);
+
+// NKB — dedup flag: when keydown successfully handles a key, suppress the input event
+let _nkbKeydownHandled = false;
+
+$("kb-input").addEventListener("keydown", (e) => {
+  if (!isConnected) return;
+  e.stopPropagation();
+  if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
+
+  // On mobile soft keyboards e.key is often "Unidentified" — skip and let
+  // the input event handle it instead
+  if (e.key === "Unidentified" || e.key === "Process") return;
+
+  e.preventDefault();
+  _nkbKeydownHandled = true;
+
+  const allMods = buildModList(e);
+  const hadSticky = mods.ctrl || mods.alt || mods.cmd || mods.shift;
+
+  // For printable chars with ONLY shift (no ctrl/alt/cmd), send via type_text
+  // which already handles uppercase on the server side
+  const onlyShift = allMods.length === 1 && allMods[0] === "shift"
+                    && !mods.ctrl && !mods.alt && !mods.cmd;
+  if (e.key.length === 1 && (allMods.length === 0 || onlyShift)) {
+    socket.emit("type_text", { text: e.key });
+    if (hadSticky) releaseMods();
+  } else if (allMods.length > 0) {
+    socket.emit("hotkey", { modifiers: allMods, key: e.key });
+    if (hadSticky) releaseMods();
   } else {
     socket.emit("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
   }
 });
 
-// Mobile native keyboards fire "input" instead of reliable keydown
+// Mobile soft keyboards fire "input" instead of reliable keydown
 $("kb-input").addEventListener("input", () => {
+  if (_nkbKeydownHandled) {
+    _nkbKeydownHandled = false;
+    $("kb-input").value = "";
+    return;
+  }
   const v = $("kb-input").value;
   if (v.length > 0) {
     const ch = v.charAt(v.length - 1);
@@ -935,7 +968,8 @@ $("kb-input").addEventListener("input", () => {
       socket.emit("hotkey", { modifiers: activeMods, key: ch });
       releaseMods();
     } else {
-      socket.emit("keydown", { key: ch, ctrl: false, shift: false, alt: false, meta: false });
+      // type_text handles uppercase/shifted chars correctly on the server
+      socket.emit("type_text", { text: ch });
     }
     $("kb-input").value = "";
   }
@@ -955,6 +989,10 @@ $("btn-nkb").onclick = () => {
   $("btn-nkb").classList.toggle("active", nkbActive);
   nkbActive ? $("kb-input").focus() : $("kb-input").blur();
 };
+// Re-focus NKB input if it loses focus while NKB mode is active
+$("kb-input").addEventListener("blur", () => {
+  if (nkbActive) setTimeout(() => $("kb-input").focus(), 100);
+});
 
 // Settings
 $("sl-fps").oninput = () => $("val-fps").textContent = $("sl-fps").value;

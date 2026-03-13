@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>MacBook Remote</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #1c2129;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d29922;
+  --radius: 8px;
+  --toolbar-h: 44px;
+  --panel-h: 0px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body {
+  height:100%; overflow:hidden; background:var(--bg); color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  -webkit-tap-highlight-color:transparent;
+}
+
+/* ---- Toolbar ---- */
+#toolbar {
+  position:fixed; top:0; left:0; right:0; height:var(--toolbar-h);
+  background:var(--surface); border-bottom:1px solid var(--border);
+  display:flex; align-items:center; padding:0 8px; gap:6px; z-index:100;
+  user-select:none; overflow-x:auto; overflow-y:hidden;
+}
+.status-dot { width:9px; height:9px; border-radius:50%; background:var(--red); flex-shrink:0; transition:background .3s; }
+.status-dot.connected { background:var(--green); }
+.tl { font-size:12px; color:var(--text-dim); white-space:nowrap; }
+.spacer { flex:1; min-width:4px; }
+.tb {
+  background:transparent; border:1px solid var(--border); color:var(--text-dim);
+  padding:4px 8px; border-radius:6px; font-size:12px; cursor:pointer;
+  transition:all .12s; white-space:nowrap; flex-shrink:0;
+}
+.tb:hover { background:var(--border); color:var(--text); }
+.tb.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.zoom-g { display:flex; align-items:center; gap:3px; flex-shrink:0; }
+.zoom-g .tb { padding:4px 6px; font-weight:700; }
+#zoom-label { font-size:11px; color:var(--text); min-width:32px; text-align:center; }
+
+/* ---- Canvas ---- */
+#canvas-wrap {
+  position:fixed; top:var(--toolbar-h); left:0; right:0;
+  bottom:var(--panel-h); background:#000; overflow:auto; touch-action:none;
+  transition:bottom .2s;
+}
+#canvas-center { display:flex; align-items:center; justify-content:center; min-width:100%; min-height:100%; }
+#screen { display:block; cursor:none; flex-shrink:0; }
+
+/* ---- Bottom Panel Container ---- */
+#bottom-panel {
+  position:fixed; left:0; right:0; bottom:0; height:0;
+  background:var(--surface); border-top:1px solid var(--border);
+  z-index:90; overflow:hidden; transition:height .2s;
+}
+#bottom-panel.open { height:var(--panel-h); }
+.panel-page { display:none; height:100%; overflow-y:auto; }
+.panel-page.visible { display:block; }
+
+/* ---- Virtual Keyboard Panel ---- */
+.vk-section { padding:6px 8px; border-bottom:1px solid var(--border); }
+.vk-section:last-child { border-bottom:none; }
+.vk-row { display:flex; gap:4px; flex-wrap:wrap; }
+.vk-label { font-size:10px; color:var(--text-dim); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px; }
+.vk-key {
+  background:var(--surface2); border:1px solid var(--border); color:var(--text-dim);
+  padding:6px 0; border-radius:6px; font-size:12px; cursor:pointer;
+  text-align:center; min-width:36px; flex:1; max-width:60px;
+  transition:all .1s; user-select:none; -webkit-user-select:none;
+}
+.vk-key:active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.vk-key.wide { max-width:80px; }
+.vk-key.wider { max-width:120px; flex:2; }
+.vk-key.mod { border-color:var(--orange); color:var(--orange); }
+.vk-key.mod.held { background:var(--orange); color:#000; border-color:var(--orange); }
+.vk-key.shortcut { font-size:10px; border-color:var(--accent); color:var(--accent); max-width:72px; }
+.vk-key.shortcut:active { background:var(--accent); color:#fff; }
+.vk-text-row { display:flex; gap:4px; }
+#vk-text-input {
+  flex:1; background:var(--bg); border:1px solid var(--border); border-radius:6px;
+  color:var(--text); padding:6px 10px; font-size:14px; outline:none;
+}
+#vk-text-input:focus { border-color:var(--accent); }
+#vk-text-send {
+  background:var(--accent); color:#fff; border:none; border-radius:6px;
+  padding:6px 14px; font-size:12px; cursor:pointer;
+}
+
+/* ---- Virtual Trackpad Panel ---- */
+#trackpad-area {
+  background:var(--bg); margin:8px; border-radius:10px; border:1px solid var(--border);
+  height:calc(100% - 60px); min-height:100px; touch-action:none; cursor:crosshair;
+  display:flex; align-items:center; justify-content:center; color:var(--text-dim); font-size:13px;
+  user-select:none; -webkit-user-select:none;
+}
+.tp-buttons { display:flex; gap:4px; padding:4px 8px; }
+.tp-btn {
+  flex:1; background:var(--surface2); border:1px solid var(--border);
+  color:var(--text-dim); padding:8px; border-radius:6px; text-align:center;
+  font-size:12px; cursor:pointer; user-select:none; -webkit-user-select:none;
+}
+.tp-btn:active { background:var(--accent); color:#fff; border-color:var(--accent); }
+
+/* ---- File Panel ---- */
+.file-section { padding:8px; }
+.file-upload-row { display:flex; gap:6px; align-items:center; margin-bottom:8px; }
+.file-upload-row input[type=file] { flex:1; font-size:12px; color:var(--text-dim); }
+.file-upload-btn {
+  background:var(--accent); color:#fff; border:none; border-radius:6px;
+  padding:6px 14px; font-size:12px; cursor:pointer; white-space:nowrap;
+}
+.file-path-bar {
+  display:flex; align-items:center; gap:4px; margin-bottom:6px;
+  font-size:12px; color:var(--text-dim); overflow-x:auto; white-space:nowrap;
+}
+.file-path-bar button {
+  background:var(--surface2); border:1px solid var(--border); color:var(--accent);
+  padding:3px 8px; border-radius:4px; font-size:11px; cursor:pointer;
+}
+.file-list { max-height:calc(100% - 80px); overflow-y:auto; }
+.file-item {
+  display:flex; align-items:center; gap:8px; padding:6px 8px;
+  border-bottom:1px solid var(--border); font-size:12px; cursor:pointer;
+}
+.file-item:hover { background:var(--surface2); }
+.file-icon { font-size:16px; flex-shrink:0; }
+.file-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-size { color:var(--text-dim); font-size:11px; flex-shrink:0; }
+.file-dl {
+  background:var(--surface2); border:1px solid var(--border); color:var(--accent);
+  padding:2px 8px; border-radius:4px; font-size:11px; cursor:pointer; text-decoration:none; flex-shrink:0;
+}
+
+/* ---- Clipboard Panel ---- */
+.clip-section { padding:8px; height:100%; display:flex; flex-direction:column; }
+.clip-section textarea {
+  flex:1; background:var(--bg); border:1px solid var(--border); border-radius:6px;
+  color:var(--text); padding:8px; font-size:13px; resize:none; outline:none; font-family:monospace;
+}
+.clip-section textarea:focus { border-color:var(--accent); }
+.clip-actions { display:flex; gap:6px; margin-top:6px; }
+.clip-actions button {
+  flex:1; padding:8px; border-radius:6px; border:1px solid var(--border);
+  font-size:12px; cursor:pointer; background:var(--surface2); color:var(--text-dim);
+}
+.clip-actions .primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+
+/* ---- Settings ---- */
+#settings-overlay {
+  display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6);
+  z-index:200; align-items:center; justify-content:center;
+}
+#settings-overlay.open { display:flex; }
+#settings-panel {
+  background:var(--surface); border:1px solid var(--border); border-radius:12px;
+  padding:20px; width:300px; max-width:90vw;
+}
+#settings-panel h2 { font-size:15px; margin-bottom:16px; }
+.sr { margin-bottom:12px; }
+.sr label { display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); margin-bottom:4px; }
+.sr label span { color:var(--text); font-weight:600; }
+.sr input[type=range] { width:100%; accent-color:var(--accent); }
+.sa { display:flex; gap:6px; margin-top:16px; }
+.sa button { flex:1; padding:7px; border-radius:6px; border:1px solid var(--border); font-size:12px; cursor:pointer; }
+.sa .apply { background:var(--accent); color:#fff; border-color:var(--accent); }
+.sa .cancel { background:transparent; color:var(--text-dim); }
+
+/* ---- Connection banner ---- */
+#connect-banner {
+  position:fixed; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; background:var(--bg);
+  z-index:300; gap:16px; transition:opacity .3s;
+}
+#connect-banner.hidden { opacity:0; pointer-events:none; }
+.spinner { width:32px; height:32px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+#connect-banner p { font-size:14px; color:var(--text-dim); }
+
+/* ---- Toast ---- */
+#toast {
+  position:fixed; top:calc(var(--toolbar-h)+8px); left:50%; transform:translateX(-50%);
+  background:rgba(0,0,0,0.85); color:var(--text); padding:6px 16px;
+  border-radius:20px; font-size:12px; z-index:150; pointer-events:none;
+  opacity:0; transition:opacity .3s;
+}
+#toast.show { opacity:1; }
+
+/* ---- Utility ---- */
+#kb-input { position:fixed; top:-100px; left:-100px; width:1px; height:1px; opacity:0; }
+</style>
+</head>
+<body>
+
+<div id="connect-banner"><div class="spinner"></div><p>Connecting to MacBook...</p></div>
+<div id="toast"></div>
+
+<!-- ===== Toolbar ===== -->
+<div id="toolbar">
+  <div class="status-dot" id="status-dot"></div>
+  <span class="tl" id="status-text">Disconnected</span>
+  <span class="tl" id="fps-display"></span>
+  <span class="spacer"></span>
+  <div class="zoom-g">
+    <button class="tb" id="btn-zo" title="Zoom out">&minus;</button>
+    <span id="zoom-label">Fit</span>
+    <button class="tb" id="btn-zi" title="Zoom in">+</button>
+    <button class="tb" id="btn-zf" title="Fit">Fit</button>
+  </div>
+  <button class="tb" id="btn-mode" title="Direct / Trackpad">Direct</button>
+  <button class="tb" id="btn-p-tp" title="Trackpad panel">Pad</button>
+  <button class="tb" id="btn-p-kb" title="Virtual keyboard">Keys</button>
+  <button class="tb" id="btn-p-clip" title="Clipboard">Clip</button>
+  <button class="tb" id="btn-p-files" title="File transfer">Files</button>
+  <button class="tb" id="btn-nkb" title="Native keyboard">NKB</button>
+  <button class="tb" id="btn-settings" title="Settings">&#9881;</button>
+</div>
+
+<!-- ===== Canvas ===== -->
+<div id="canvas-wrap">
+  <div id="canvas-center"><canvas id="screen" tabindex="0"></canvas></div>
+</div>
+
+<!-- ===== Bottom Panel ===== -->
+<div id="bottom-panel">
+
+  <!-- Virtual Keyboard -->
+  <div id="panel-kb" class="panel-page">
+    <div class="vk-section">
+      <div class="vk-label">Modifiers (sticky — tap to hold, tap again to release)</div>
+      <div class="vk-row" id="mod-row">
+        <button class="vk-key mod" data-mod="ctrl">Ctrl</button>
+        <button class="vk-key mod" data-mod="alt">Alt/&#8997;</button>
+        <button class="vk-key mod" data-mod="cmd">Cmd/&#8984;</button>
+        <button class="vk-key mod" data-mod="shift">Shift/&#8679;</button>
+      </div>
+    </div>
+    <div class="vk-section">
+      <div class="vk-label">Developer Shortcuts</div>
+      <div class="vk-row">
+        <button class="vk-key shortcut" data-hk="cmd+s">&#8984;S</button>
+        <button class="vk-key shortcut" data-hk="cmd+c">&#8984;C</button>
+        <button class="vk-key shortcut" data-hk="cmd+v">&#8984;V</button>
+        <button class="vk-key shortcut" data-hk="cmd+x">&#8984;X</button>
+        <button class="vk-key shortcut" data-hk="cmd+z">&#8984;Z</button>
+        <button class="vk-key shortcut" data-hk="cmd+shift+z">&#8984;&#8679;Z</button>
+        <button class="vk-key shortcut" data-hk="cmd+a">&#8984;A</button>
+        <button class="vk-key shortcut" data-hk="cmd+f">&#8984;F</button>
+      </div>
+      <div class="vk-row" style="margin-top:4px">
+        <button class="vk-key shortcut" data-hk="cmd+shift+p">&#8984;&#8679;P</button>
+        <button class="vk-key shortcut" data-hk="cmd+p">&#8984;P</button>
+        <button class="vk-key shortcut" data-hk="cmd+w">&#8984;W</button>
+        <button class="vk-key shortcut" data-hk="cmd+t">&#8984;T</button>
+        <button class="vk-key shortcut" data-hk="cmd+n">&#8984;N</button>
+        <button class="vk-key shortcut" data-hk="cmd+`">&#8984;`</button>
+        <button class="vk-key shortcut" data-hk="cmd+Tab">&#8984;Tab</button>
+        <button class="vk-key shortcut" data-hk="ctrl+`">&#8963;`</button>
+      </div>
+      <div class="vk-row" style="margin-top:4px">
+        <button class="vk-key shortcut" data-hk="cmd+shift+f">&#8984;&#8679;F</button>
+        <button class="vk-key shortcut" data-hk="cmd+shift+e">&#8984;&#8679;E</button>
+        <button class="vk-key shortcut" data-hk="cmd+shift+k">&#8984;&#8679;K</button>
+        <button class="vk-key shortcut" data-hk="cmd+d">&#8984;D</button>
+        <button class="vk-key shortcut" data-hk="cmd+/">&#8984;/</button>
+        <button class="vk-key shortcut" data-hk="alt+shift+f">&#8997;&#8679;F</button>
+        <button class="vk-key shortcut" data-hk="cmd+shift+l">&#8984;&#8679;L</button>
+        <button class="vk-key shortcut" data-hk="ctrl+c">&#8963;C</button>
+      </div>
+    </div>
+    <div class="vk-section">
+      <div class="vk-label">Navigation &amp; Special</div>
+      <div class="vk-row">
+        <button class="vk-key" data-key="Escape">Esc</button>
+        <button class="vk-key" data-key="Tab">Tab</button>
+        <button class="vk-key" data-key="Backspace">&#9003;</button>
+        <button class="vk-key" data-key="Delete">Del</button>
+        <button class="vk-key" data-key="Enter">&#9166;</button>
+        <button class="vk-key" data-key=" ">Space</button>
+        <button class="vk-key" data-key="Home">Home</button>
+        <button class="vk-key" data-key="End">End</button>
+        <button class="vk-key" data-key="PageUp">PgUp</button>
+        <button class="vk-key" data-key="PageDown">PgDn</button>
+      </div>
+    </div>
+    <div class="vk-section">
+      <div class="vk-label">Arrows</div>
+      <div class="vk-row" style="justify-content:center; gap:6px;">
+        <button class="vk-key" data-key="ArrowLeft" style="font-size:16px">&larr;</button>
+        <button class="vk-key" data-key="ArrowDown" style="font-size:16px">&darr;</button>
+        <button class="vk-key" data-key="ArrowUp" style="font-size:16px">&uarr;</button>
+        <button class="vk-key" data-key="ArrowRight" style="font-size:16px">&rarr;</button>
+      </div>
+    </div>
+    <div class="vk-section">
+      <div class="vk-label">Function Keys</div>
+      <div class="vk-row">
+        <button class="vk-key" data-key="F1">F1</button>
+        <button class="vk-key" data-key="F2">F2</button>
+        <button class="vk-key" data-key="F3">F3</button>
+        <button class="vk-key" data-key="F4">F4</button>
+        <button class="vk-key" data-key="F5">F5</button>
+        <button class="vk-key" data-key="F6">F6</button>
+        <button class="vk-key" data-key="F7">F7</button>
+        <button class="vk-key" data-key="F8">F8</button>
+        <button class="vk-key" data-key="F9">F9</button>
+        <button class="vk-key" data-key="F10">F10</button>
+        <button class="vk-key" data-key="F11">F11</button>
+        <button class="vk-key" data-key="F12">F12</button>
+      </div>
+    </div>
+    <div class="vk-section">
+      <div class="vk-label">Type Text</div>
+      <div class="vk-text-row">
+        <input type="text" id="vk-text-input" placeholder="Type here, then send..." autocomplete="off" autocorrect="off">
+        <button id="vk-text-send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Virtual Trackpad -->
+  <div id="panel-tp" class="panel-page">
+    <div id="trackpad-area">Drag to move cursor &middot; Tap to click</div>
+    <div class="tp-buttons">
+      <button class="tp-btn" id="tp-left">Left Click</button>
+      <button class="tp-btn" id="tp-right">Right Click</button>
+      <button class="tp-btn" id="tp-dbl">Double Click</button>
+      <button class="tp-btn" id="tp-sup">Scroll &#8593;</button>
+      <button class="tp-btn" id="tp-sdn">Scroll &#8595;</button>
+    </div>
+  </div>
+
+  <!-- Clipboard -->
+  <div id="panel-clip" class="panel-page">
+    <div class="clip-section">
+      <textarea id="clip-text" placeholder="Paste text here from your phone (long-press → Paste), then tap 'Send to Mac &amp; Paste'"></textarea>
+      <div class="clip-actions">
+        <button id="clip-read-phone">Read Phone Clipboard</button>
+        <button id="clip-get">Get Mac Clipboard</button>
+      </div>
+      <div class="clip-actions" style="margin-top:4px">
+        <button id="clip-set">Set Mac Clipboard</button>
+        <button id="clip-paste" class="primary">Send to Mac &amp; Paste</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- File Transfer -->
+  <div id="panel-files" class="panel-page">
+    <div class="file-section">
+      <div class="file-upload-row">
+        <input type="file" id="file-input" multiple>
+        <button class="file-upload-btn" id="file-upload-btn">Upload to Mac</button>
+      </div>
+      <div class="file-path-bar">
+        <button id="file-up">&uarr; Up</button>
+        <span id="file-path">~</span>
+      </div>
+      <div class="file-list" id="file-list"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Settings -->
+<div id="settings-overlay">
+  <div id="settings-panel">
+    <h2>Stream Settings</h2>
+    <div class="sr"><label>FPS <span id="val-fps">15</span></label><input type="range" id="sl-fps" min="1" max="30" value="15"></div>
+    <div class="sr"><label>Quality <span id="val-q">50</span></label><input type="range" id="sl-q" min="10" max="100" value="50"></div>
+    <div class="sr"><label>Scale <span id="val-s">0.50</span></label><input type="range" id="sl-s" min="25" max="100" value="50"></div>
+    <div class="sa">
+      <button class="cancel" id="s-cancel">Cancel</button>
+      <button class="apply" id="s-apply">Apply</button>
+    </div>
+  </div>
+</div>
+
+<input id="kb-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+<script>
+(function() {
+"use strict";
+
+const $ = (s) => document.getElementById(s);
+const canvas = $("screen"), ctx = canvas.getContext("2d");
+const canvasWrap = $("canvas-wrap"), canvasCenter = $("canvas-center");
+const bottomPanel = $("bottom-panel");
+const toast = $("toast");
+
+// ===== State =====
+let screenW = 1, screenH = 1;
+let cursorX = 0.5, cursorY = 0.5;
+let isConnected = false;
+let frameCount = 0;
+let interactionMode = "direct";
+
+// Zoom
+const ZOOM_MIN = 0.5, ZOOM_MAX = 5.0, ZOOM_STEP = 0.25;
+let zoomLevel = 1, baseFitW = 100, baseFitH = 100;
+
+// Sticky modifiers
+const mods = { ctrl: false, alt: false, cmd: false, shift: false };
+
+// Active panel
+let activePanel = null;
+const PANEL_HEIGHT = 300;
+
+// ===== Socket =====
+const socket = io({ transports: ["websocket", "polling"] });
+
+socket.on("connect", () => {
+  isConnected = true;
+  $("status-dot").classList.add("connected");
+  $("status-text").textContent = "Connected";
+  setTimeout(() => $("connect-banner").classList.add("hidden"), 400);
+});
+socket.on("disconnect", () => {
+  isConnected = false;
+  $("status-dot").classList.remove("connected");
+  $("status-text").textContent = "Disconnected";
+  $("connect-banner").classList.remove("hidden");
+});
+socket.on("screen_info", (d) => { screenW = d.width; screenH = d.height; });
+
+// ===== Frames =====
+const frameImg = new Image();
+let framePending = false, firstFrame = true;
+
+frameImg.onload = () => {
+  if (canvas.width !== frameImg.width || canvas.height !== frameImg.height) {
+    canvas.width = frameImg.width;
+    canvas.height = frameImg.height;
+    if (firstFrame) { firstFrame = false; recalcFit(); applyZoom(); }
+  }
+  ctx.drawImage(frameImg, 0, 0);
+  drawCursor();
+  framePending = false;
+  frameCount++;
+};
+socket.on("frame", (d) => {
+  if (framePending) return;
+  framePending = true;
+  screenW = d.w; screenH = d.h;
+  frameImg.src = "data:image/jpeg;base64," + d.img;
+});
+
+setInterval(() => { $("fps-display").textContent = frameCount + " FPS"; frameCount = 0; }, 1000);
+
+// ===== Cursor =====
+function drawCursor() {
+  const cx = cursorX * canvas.width, cy = cursorY * canvas.height;
+  ctx.save(); ctx.translate(cx, cy);
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,18); ctx.lineTo(5,14); ctx.lineTo(10,14); ctx.closePath();
+  ctx.fillStyle = "rgba(255,255,255,.95)"; ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,.9)"; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.restore();
+}
+
+// ===== Toast =====
+let toastTimer = null;
+function showToast(text) {
+  toast.textContent = text; toast.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("show"), 2000);
+}
+
+// ===== Zoom =====
+function recalcFit() {
+  if (!canvas.width) return;
+  const w = canvasWrap.clientWidth, h = canvasWrap.clientHeight;
+  const a = canvas.width / canvas.height;
+  baseFitW = w; baseFitH = baseFitW / a;
+  if (baseFitH > h) { baseFitH = h; baseFitW = baseFitH * a; }
+}
+function applyZoom() {
+  const w = Math.round(baseFitW * zoomLevel), h = Math.round(baseFitH * zoomLevel);
+  canvas.style.width = w + "px"; canvas.style.height = h + "px";
+  canvasCenter.style.minWidth = zoomLevel <= 1.01 ? "100%" : w + "px";
+  canvasCenter.style.minHeight = zoomLevel <= 1.01 ? "100%" : h + "px";
+  $("zoom-label").textContent = zoomLevel === 1 ? "Fit" : Math.round(zoomLevel * 100) + "%";
+}
+function setZoom(z) { zoomLevel = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z * 4) / 4)); applyZoom(); }
+window.addEventListener("resize", () => { recalcFit(); applyZoom(); });
+$("btn-zi").onclick = () => setZoom(zoomLevel + ZOOM_STEP);
+$("btn-zo").onclick = () => setZoom(zoomLevel - ZOOM_STEP);
+$("btn-zf").onclick = () => { setZoom(1); canvasWrap.scrollTo(0, 0); };
+
+// ===== Panel management =====
+function openPanel(id) {
+  if (activePanel === id) { closePanel(); return; }
+  document.querySelectorAll(".panel-page").forEach(p => p.classList.remove("visible"));
+  $(id).classList.add("visible");
+  document.documentElement.style.setProperty("--panel-h", PANEL_HEIGHT + "px");
+  bottomPanel.classList.add("open");
+  activePanel = id;
+  // highlight active toolbar button
+  ["btn-p-kb","btn-p-tp","btn-p-clip","btn-p-files"].forEach(b => $(b).classList.remove("active"));
+  const btnMap = {"panel-kb":"btn-p-kb","panel-tp":"btn-p-tp","panel-clip":"btn-p-clip","panel-files":"btn-p-files"};
+  if (btnMap[id]) $(btnMap[id]).classList.add("active");
+  setTimeout(() => { recalcFit(); applyZoom(); }, 220);
+}
+function closePanel() {
+  bottomPanel.classList.remove("open");
+  document.documentElement.style.setProperty("--panel-h", "0px");
+  activePanel = null;
+  ["btn-p-kb","btn-p-tp","btn-p-clip","btn-p-files"].forEach(b => $(b).classList.remove("active"));
+  setTimeout(() => { recalcFit(); applyZoom(); }, 220);
+}
+
+$("btn-p-kb").onclick = () => openPanel("panel-kb");
+$("btn-p-tp").onclick = () => openPanel("panel-tp");
+$("btn-p-clip").onclick = () => { openPanel("panel-clip"); socket.emit("clipboard_get"); };
+$("btn-p-files").onclick = () => { openPanel("panel-files"); loadFiles(); };
+
+// ===== Coordinate helpers =====
+function canvasCoords(cx, cy) {
+  const r = canvas.getBoundingClientRect();
+  return { x: Math.max(0, Math.min(1, (cx - r.left) / r.width)), y: Math.max(0, Math.min(1, (cy - r.top) / r.height)) };
+}
+function throttle(fn, ms) { let l = 0; return (...a) => { const n = Date.now(); if (n - l >= ms) { l = n; fn(...a); } }; }
+const emitMove = throttle((c) => socket.emit("move", c), 25);
+
+// ===== Sticky modifiers =====
+function getActiveMods() {
+  const m = [];
+  if (mods.ctrl) m.push("ctrl");
+  if (mods.alt) m.push("alt");
+  if (mods.cmd) m.push("cmd");
+  if (mods.shift) m.push("shift");
+  return m;
+}
+function releaseMods() {
+  mods.ctrl = mods.alt = mods.cmd = mods.shift = false;
+  document.querySelectorAll(".vk-key.mod").forEach(b => b.classList.remove("held"));
+}
+function sendKeyWithMods(key) {
+  const m = getActiveMods();
+  if (m.length > 0) {
+    socket.emit("hotkey", { modifiers: m, key });
+    releaseMods();
+  } else {
+    socket.emit("keydown", { key, ctrl: false, alt: false, shift: false, meta: false });
+  }
+}
+
+// Modifier toggle buttons
+document.querySelectorAll(".vk-key.mod").forEach(btn => {
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    const mod = btn.dataset.mod;
+    mods[mod] = !mods[mod];
+    btn.classList.toggle("held", mods[mod]);
+  });
+  btn.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+});
+
+// ===== Virtual Keyboard — key buttons =====
+document.querySelectorAll(".vk-key[data-key]").forEach(btn => {
+  function fire(e) {
+    e.preventDefault(); e.stopPropagation();
+    sendKeyWithMods(btn.dataset.key);
+  }
+  btn.addEventListener("click", fire);
+  btn.addEventListener("touchend", (e) => { e.preventDefault(); e.stopPropagation(); fire(e); });
+});
+
+// Shortcut buttons
+document.querySelectorAll(".vk-key[data-hk]").forEach(btn => {
+  function fire(e) {
+    e.preventDefault(); e.stopPropagation();
+    const parts = btn.dataset.hk.split("+");
+    const key = parts.pop();
+    socket.emit("hotkey", { modifiers: parts, key });
+  }
+  btn.addEventListener("click", fire);
+  btn.addEventListener("touchend", (e) => { e.preventDefault(); e.stopPropagation(); fire(e); });
+});
+
+// Text input send
+$("vk-text-send").onclick = () => {
+  const t = $("vk-text-input").value;
+  if (t) { socket.emit("type_text", { text: t }); $("vk-text-input").value = ""; showToast("Text sent"); }
+};
+$("vk-text-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("vk-text-send").click(); }
+  e.stopPropagation();
+});
+
+// ===== Virtual Trackpad =====
+const tpArea = $("trackpad-area");
+let tpLast = null, tpStart = null, tpStartTime = 0;
+
+tpArea.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  const t = e.touches[0];
+  tpLast = { x: t.clientX, y: t.clientY };
+  tpStart = { x: t.clientX, y: t.clientY };
+  tpStartTime = Date.now();
+}, { passive: false });
+
+tpArea.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  const t = e.touches[0];
+  if (tpLast) {
+    const r = tpArea.getBoundingClientRect();
+    const sens = 2.0;
+    const dx = (t.clientX - tpLast.x) / r.width * sens;
+    const dy = (t.clientY - tpLast.y) / r.height * sens;
+    cursorX = Math.max(0, Math.min(1, cursorX + dx));
+    cursorY = Math.max(0, Math.min(1, cursorY + dy));
+    emitMove({ x: cursorX, y: cursorY });
+  }
+  tpLast = { x: t.clientX, y: t.clientY };
+}, { passive: false });
+
+tpArea.addEventListener("touchend", (e) => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  const elapsed = Date.now() - tpStartTime;
+  const dist = tpStart ? Math.hypot(t.clientX - tpStart.x, t.clientY - tpStart.y) : 999;
+  if (elapsed < 250 && dist < 12) {
+    socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
+  }
+  tpLast = null;
+}, { passive: false });
+
+// Also support mouse on trackpad (for desktop testing)
+let tpMouseDown = false, tpMouseLast = null;
+tpArea.addEventListener("mousedown", (e) => {
+  tpMouseDown = true;
+  tpMouseLast = { x: e.clientX, y: e.clientY };
+});
+tpArea.addEventListener("mousemove", (e) => {
+  if (!tpMouseDown || !tpMouseLast) return;
+  const r = tpArea.getBoundingClientRect();
+  const sens = 2.0;
+  cursorX = Math.max(0, Math.min(1, cursorX + (e.clientX - tpMouseLast.x) / r.width * sens));
+  cursorY = Math.max(0, Math.min(1, cursorY + (e.clientY - tpMouseLast.y) / r.height * sens));
+  emitMove({ x: cursorX, y: cursorY });
+  tpMouseLast = { x: e.clientX, y: e.clientY };
+});
+tpArea.addEventListener("mouseup", () => { tpMouseDown = false; tpMouseLast = null; });
+
+$("tp-left").onclick = () => socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
+$("tp-right").onclick = () => socket.emit("click", { x: cursorX, y: cursorY, btn: "right" });
+$("tp-dbl").onclick = () => socket.emit("dblclick", { x: cursorX, y: cursorY });
+$("tp-sup").onclick = () => socket.emit("scroll", { dy: 5 });
+$("tp-sdn").onclick = () => socket.emit("scroll", { dy: -5 });
+
+// Touch versions for trackpad buttons
+["tp-left","tp-right","tp-dbl","tp-sup","tp-sdn"].forEach(id => {
+  $(id).addEventListener("touchstart", (e) => { e.preventDefault(); $(id).click(); }, { passive: false });
+});
+
+// ===== Clipboard =====
+socket.on("clipboard_content", (d) => { $("clip-text").value = d.text || ""; });
+$("clip-get").onclick = () => { socket.emit("clipboard_get"); showToast("Fetching Mac clipboard..."); };
+$("clip-set").onclick = () => { socket.emit("clipboard_set", { text: $("clip-text").value }); showToast("Mac clipboard set"); };
+$("clip-paste").onclick = () => {
+  const text = $("clip-text").value;
+  if (!text) { showToast("Text area is empty — paste your phone text first"); return; }
+  socket.emit("clipboard_set", { text });
+  setTimeout(() => socket.emit("hotkey", { modifiers: ["cmd"], key: "v" }), 150);
+  showToast("Pasting on Mac...");
+};
+$("clip-read-phone").onclick = async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    $("clip-text").value = text;
+    showToast("Phone clipboard loaded (" + text.length + " chars)");
+  } catch (e) {
+    showToast("Can't read clipboard — long-press the text area and paste manually");
+  }
+};
+
+// ===== File Transfer =====
+let currentFilePath = null;
+
+function loadFiles(path) {
+  const url = path ? "/api/files?path=" + encodeURIComponent(path) : "/api/files";
+  fetch(url).then(r => r.json()).then(data => {
+    if (data.error) { showToast("Error: " + data.error); return; }
+    currentFilePath = data.path;
+    $("file-path").textContent = data.path.replace(/^\/Users\/[^/]+/, "~");
+    $("file-up").style.display = data.parent ? "inline-block" : "none";
+    $("file-up").onclick = () => loadFiles(data.parent);
+    const list = $("file-list");
+    list.innerHTML = "";
+    data.items.forEach(item => {
+      const row = document.createElement("div");
+      row.className = "file-item";
+      if (item.is_dir) {
+        row.innerHTML = '<span class="file-icon">&#128193;</span><span class="file-name">' + esc(item.name) + '</span>';
+        row.onclick = () => loadFiles(item.path);
+      } else {
+        row.innerHTML = '<span class="file-icon">&#128196;</span><span class="file-name">' + esc(item.name) +
+          '</span><span class="file-size">' + item.size + '</span>' +
+          '<a class="file-dl" href="/download?path=' + encodeURIComponent(item.path) + '" target="_blank">&#8681;</a>';
+      }
+      list.appendChild(row);
+    });
+  }).catch(e => showToast("Failed to load files"));
+}
+
+$("file-upload-btn").onclick = () => {
+  const files = $("file-input").files;
+  if (!files.length) { showToast("Select a file first"); return; }
+  let done = 0;
+  for (const f of files) {
+    const fd = new FormData();
+    fd.append("file", f);
+    fetch("/upload", { method: "POST", body: fd })
+      .then(r => r.json())
+      .then(d => { done++; if (done === files.length) { showToast(done + " file(s) uploaded"); loadFiles(currentFilePath); } })
+      .catch(() => showToast("Upload failed"));
+  }
+};
+
+function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+// ===== Desktop mouse events =====
+let isDragging = false;
+canvas.addEventListener("mousemove", (e) => {
+  const c = canvasCoords(e.clientX, e.clientY);
+  cursorX = c.x; cursorY = c.y;
+  isDragging ? socket.emit("drag", c) : emitMove(c);
+});
+canvas.addEventListener("mousedown", (e) => {
+  e.preventDefault(); canvas.focus();
+  isDragging = true;
+  socket.emit("mousedown", { ...canvasCoords(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
+});
+canvas.addEventListener("mouseup", (e) => {
+  e.preventDefault(); isDragging = false;
+  socket.emit("mouseup", { ...canvasCoords(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
+});
+canvas.addEventListener("click", (e) => e.preventDefault());
+canvas.addEventListener("dblclick", (e) => { e.preventDefault(); socket.emit("dblclick", canvasCoords(e.clientX, e.clientY)); });
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+canvasWrap.addEventListener("wheel", (e) => {
+  if (e.ctrlKey || e.metaKey) { e.preventDefault(); setZoom(zoomLevel + (e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP)); }
+  else if (zoomLevel <= 1.01) { e.preventDefault(); socket.emit("scroll", { dy: e.deltaY > 0 ? -3 : 3 }); }
+}, { passive: false });
+
+// ===== Touch on canvas =====
+let tStartTime = 0, tStartXY = {x:0,y:0}, tMoved = false, trackpadLP = null;
+let pinchActive = false, lastPinchDist = 0, pinchBaseZoom = 1;
+let twoFingerMid = null;
+
+function pDist(a,b) { return Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY); }
+function midpoint(a,b) { return { x:(a.clientX+b.clientX)/2, y:(a.clientY+b.clientY)/2 }; }
+
+canvas.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    pinchActive = true;
+    lastPinchDist = pDist(e.touches[0], e.touches[1]);
+    pinchBaseZoom = zoomLevel;
+    twoFingerMid = midpoint(e.touches[0], e.touches[1]);
+    return;
+  }
+  if (e.touches.length !== 1) return;
+  const t = e.touches[0], c = canvasCoords(t.clientX, t.clientY);
+  tStartTime = Date.now(); tStartXY = {x:t.clientX,y:t.clientY}; tMoved = false;
+  if (interactionMode === "direct") { cursorX = c.x; cursorY = c.y; emitMove(c); }
+  else trackpadLP = {x:t.clientX,y:t.clientY};
+}, { passive: false });
+
+canvas.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  if (e.touches.length === 2 && pinchActive) {
+    const d = pDist(e.touches[0], e.touches[1]);
+    if (lastPinchDist > 0) setZoom(pinchBaseZoom * d / lastPinchDist);
+
+    // Two-finger pan: track midpoint movement
+    const mid = midpoint(e.touches[0], e.touches[1]);
+    if (twoFingerMid) {
+      const dx = mid.x - twoFingerMid.x;
+      const dy = mid.y - twoFingerMid.y;
+      if (zoomLevel > 1.01) {
+        // Pan the zoomed viewport
+        canvasWrap.scrollLeft -= dx;
+        canvasWrap.scrollTop -= dy;
+      } else {
+        // Remote scroll when at fit-to-screen
+        if (Math.abs(dy) > 3) {
+          socket.emit("scroll", { dy: dy > 0 ? -1 : 1 });
+        }
+      }
+    }
+    twoFingerMid = mid;
+    return;
+  }
+  if (e.touches.length !== 1) return;
+  tMoved = true;
+  const t = e.touches[0];
+  if (interactionMode === "direct") { const c = canvasCoords(t.clientX, t.clientY); cursorX = c.x; cursorY = c.y; emitMove(c); }
+  else if (trackpadLP) {
+    const r = canvas.getBoundingClientRect(), s = 1.5;
+    cursorX = Math.max(0, Math.min(1, cursorX + (t.clientX-trackpadLP.x)/r.width*s));
+    cursorY = Math.max(0, Math.min(1, cursorY + (t.clientY-trackpadLP.y)/r.height*s));
+    emitMove({x:cursorX,y:cursorY});
+    trackpadLP = {x:t.clientX,y:t.clientY};
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchend", (e) => {
+  e.preventDefault();
+  if (e.touches.length < 2) { pinchActive = false; lastPinchDist = 0; twoFingerMid = null; }
+  if (e.touches.length > 0) return;
+  const t = e.changedTouches[0], elapsed = Date.now()-tStartTime;
+  const dist = Math.hypot(t.clientX-tStartXY.x, t.clientY-tStartXY.y);
+  if (elapsed < 300 && dist < 15) {
+    const c = interactionMode === "direct" ? canvasCoords(t.clientX, t.clientY) : {x:cursorX,y:cursorY};
+    socket.emit("click", {...c, btn:"left"});
+  }
+  trackpadLP = null;
+}, { passive: false });
+
+// ===== Keyboard =====
+function handleKeyDown(e) {
+  if (!isConnected) return;
+  if ($("settings-overlay").classList.contains("open")) return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  e.preventDefault();
+  socket.emit("keydown", { key: e.key, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey });
+}
+canvas.addEventListener("keydown", handleKeyDown);
+
+// NKB (native keyboard) handler — applies sticky modifiers from the Keys panel
+$("kb-input").addEventListener("keydown", (e) => {
+  if (!isConnected) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
+
+  // Merge physical modifiers with sticky modifiers
+  const useCtrl = e.ctrlKey || mods.ctrl;
+  const useAlt = e.altKey || mods.alt;
+  const useMeta = e.metaKey || mods.cmd;
+  const useShift = e.shiftKey || mods.shift;
+  const allMods = [];
+  if (useCtrl) allMods.push("ctrl");
+  if (useAlt) allMods.push("alt");
+  if (useMeta) allMods.push("cmd");
+  if (useShift) allMods.push("shift");
+
+  if (allMods.length > 0) {
+    socket.emit("hotkey", { modifiers: allMods, key: e.key });
+    releaseMods();
+  } else {
+    socket.emit("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
+  }
+});
+
+// Mobile native keyboards fire "input" instead of reliable keydown
+$("kb-input").addEventListener("input", () => {
+  const v = $("kb-input").value;
+  if (v.length > 0) {
+    const ch = v.charAt(v.length - 1);
+    const activeMods = getActiveMods();
+    if (activeMods.length > 0) {
+      socket.emit("hotkey", { modifiers: activeMods, key: ch });
+      releaseMods();
+    } else {
+      socket.emit("keydown", { key: ch, ctrl: false, shift: false, alt: false, meta: false });
+    }
+    $("kb-input").value = "";
+  }
+});
+
+// Mode toggle
+$("btn-mode").onclick = () => {
+  interactionMode = interactionMode === "direct" ? "trackpad" : "direct";
+  $("btn-mode").textContent = interactionMode === "direct" ? "Direct" : "Trackpad";
+  showToast(interactionMode === "direct" ? "Direct: touch = cursor" : "Trackpad: drag to move");
+};
+
+// Native keyboard toggle
+let nkbActive = false;
+$("btn-nkb").onclick = () => {
+  nkbActive = !nkbActive;
+  $("btn-nkb").classList.toggle("active", nkbActive);
+  nkbActive ? $("kb-input").focus() : $("kb-input").blur();
+};
+
+// Settings
+$("sl-fps").oninput = () => $("val-fps").textContent = $("sl-fps").value;
+$("sl-q").oninput = () => $("val-q").textContent = $("sl-q").value;
+$("sl-s").oninput = () => $("val-s").textContent = ($("sl-s").value/100).toFixed(2);
+$("btn-settings").onclick = () => $("settings-overlay").classList.add("open");
+$("s-cancel").onclick = () => $("settings-overlay").classList.remove("open");
+$("settings-overlay").onclick = (e) => { if (e.target === $("settings-overlay")) $("settings-overlay").classList.remove("open"); };
+$("s-apply").onclick = () => {
+  socket.emit("update_settings", { fps:+$("sl-fps").value, quality:+$("sl-q").value, scale:+$("sl-s").value/100 });
+  $("settings-overlay").classList.remove("open");
+};
+
+canvas.focus();
+})();
+</script>
+</body>
+</html>

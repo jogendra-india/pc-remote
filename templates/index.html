@@ -113,6 +113,7 @@ html, body {
   font-size:12px; cursor:pointer; user-select:none; -webkit-user-select:none;
 }
 .tp-btn:active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.tp-btn.active { background:var(--orange); color:#000; border-color:var(--orange); }
 
 /* ---- File Panel ---- */
 .file-section { padding:8px; }
@@ -337,6 +338,7 @@ html, body {
       <button class="tp-btn" id="tp-left">Left Click</button>
       <button class="tp-btn" id="tp-right">Right Click</button>
       <button class="tp-btn" id="tp-dbl">Double Click</button>
+      <button class="tp-btn" id="tp-drag">Drag</button>
       <button class="tp-btn" id="tp-sup">Scroll &#8593;</button>
       <button class="tp-btn" id="tp-sdn">Scroll &#8595;</button>
     </div>
@@ -603,6 +605,20 @@ $("vk-text-input").addEventListener("keydown", (e) => {
 // ===== Virtual Trackpad =====
 const tpArea = $("trackpad-area");
 let tpLast = null, tpStart = null, tpStartTime = 0;
+let tpDragMode = false; // "Drag" toggle is active
+let tpDragging = false; // currently in a drag gesture (mousedown sent)
+let tpLastTapTime = 0;  // for tap-tap-hold detection
+const TAP_TAP_WINDOW = 350; // ms between taps to trigger hold-drag
+
+function tpMoveCursor(t) {
+  if (!tpLast) return;
+  const r = tpArea.getBoundingClientRect();
+  const sens = 2.0;
+  const dx = (t.clientX - tpLast.x) / r.width * sens;
+  const dy = (t.clientY - tpLast.y) / r.height * sens;
+  cursorX = Math.max(0, Math.min(1, cursorX + dx));
+  cursorY = Math.max(0, Math.min(1, cursorY + dy));
+}
 
 tpArea.addEventListener("touchstart", (e) => {
   e.preventDefault();
@@ -610,21 +626,31 @@ tpArea.addEventListener("touchstart", (e) => {
   tpLast = { x: t.clientX, y: t.clientY };
   tpStart = { x: t.clientX, y: t.clientY };
   tpStartTime = Date.now();
+
+  // Tap-tap-hold: if second tap arrives within window, start drag immediately
+  if (!tpDragMode && (tpStartTime - tpLastTapTime) < TAP_TAP_WINDOW) {
+    tpDragging = true;
+    socket.emit("mousedown", { x: cursorX, y: cursorY, btn: "left" });
+    tpArea.textContent = "Dragging (tap-hold)...";
+  }
+
+  if (tpDragMode && !tpDragging) {
+    tpDragging = true;
+    socket.emit("mousedown", { x: cursorX, y: cursorY, btn: "left" });
+    tpArea.textContent = "Dragging...";
+  }
 }, { passive: false });
 
 tpArea.addEventListener("touchmove", (e) => {
   e.preventDefault();
   const t = e.touches[0];
-  if (tpLast) {
-    const r = tpArea.getBoundingClientRect();
-    const sens = 2.0;
-    const dx = (t.clientX - tpLast.x) / r.width * sens;
-    const dy = (t.clientY - tpLast.y) / r.height * sens;
-    cursorX = Math.max(0, Math.min(1, cursorX + dx));
-    cursorY = Math.max(0, Math.min(1, cursorY + dy));
+  tpMoveCursor(t);
+  tpLast = { x: t.clientX, y: t.clientY };
+  if (tpDragging) {
+    socket.emit("drag", { x: cursorX, y: cursorY });
+  } else {
     emitMove({ x: cursorX, y: cursorY });
   }
-  tpLast = { x: t.clientX, y: t.clientY };
 }, { passive: false });
 
 tpArea.addEventListener("touchend", (e) => {
@@ -632,17 +658,30 @@ tpArea.addEventListener("touchend", (e) => {
   const t = e.changedTouches[0];
   const elapsed = Date.now() - tpStartTime;
   const dist = tpStart ? Math.hypot(t.clientX - tpStart.x, t.clientY - tpStart.y) : 999;
-  if (elapsed < 250 && dist < 12) {
+
+  if (tpDragging) {
+    socket.emit("mouseup", { x: cursorX, y: cursorY, btn: "left" });
+    tpDragging = false;
+    tpArea.textContent = tpDragMode
+      ? "Drag mode ON \u2014 touch to grab & drag"
+      : "Drag to move cursor \u00b7 Tap to click";
+  } else if (elapsed < 250 && dist < 12) {
+    // Quick tap — record time for tap-tap-hold detection, then fire click
+    tpLastTapTime = Date.now();
     socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
   }
   tpLast = null;
 }, { passive: false });
 
-// Also support mouse on trackpad (for desktop testing)
+// Mouse support on trackpad area (for desktop testing)
 let tpMouseDown = false, tpMouseLast = null;
 tpArea.addEventListener("mousedown", (e) => {
   tpMouseDown = true;
   tpMouseLast = { x: e.clientX, y: e.clientY };
+  if (tpDragMode && !tpDragging) {
+    tpDragging = true;
+    socket.emit("mousedown", { x: cursorX, y: cursorY, btn: "left" });
+  }
 });
 tpArea.addEventListener("mousemove", (e) => {
   if (!tpMouseDown || !tpMouseLast) return;
@@ -650,19 +689,37 @@ tpArea.addEventListener("mousemove", (e) => {
   const sens = 2.0;
   cursorX = Math.max(0, Math.min(1, cursorX + (e.clientX - tpMouseLast.x) / r.width * sens));
   cursorY = Math.max(0, Math.min(1, cursorY + (e.clientY - tpMouseLast.y) / r.height * sens));
-  emitMove({ x: cursorX, y: cursorY });
   tpMouseLast = { x: e.clientX, y: e.clientY };
+  if (tpDragging) {
+    socket.emit("drag", { x: cursorX, y: cursorY });
+  } else {
+    emitMove({ x: cursorX, y: cursorY });
+  }
 });
-tpArea.addEventListener("mouseup", () => { tpMouseDown = false; tpMouseLast = null; });
+tpArea.addEventListener("mouseup", () => {
+  tpMouseDown = false; tpMouseLast = null;
+  if (tpDragging) {
+    socket.emit("mouseup", { x: cursorX, y: cursorY, btn: "left" });
+    tpDragging = false;
+  }
+});
 
 $("tp-left").onclick = () => socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
 $("tp-right").onclick = () => socket.emit("click", { x: cursorX, y: cursorY, btn: "right" });
 $("tp-dbl").onclick = () => socket.emit("dblclick", { x: cursorX, y: cursorY });
+$("tp-drag").onclick = () => {
+  tpDragMode = !tpDragMode;
+  $("tp-drag").classList.toggle("active", tpDragMode);
+  tpArea.textContent = tpDragMode
+    ? "Drag mode ON \u2014 touch to grab & drag"
+    : "Drag to move cursor \u00b7 Tap to click";
+  showToast(tpDragMode ? "Drag mode ON: touch pad to grab & drag" : "Drag mode OFF");
+};
 $("tp-sup").onclick = () => socket.emit("scroll", { dy: 5 });
 $("tp-sdn").onclick = () => socket.emit("scroll", { dy: -5 });
 
 // Touch versions for trackpad buttons
-["tp-left","tp-right","tp-dbl","tp-sup","tp-sdn"].forEach(id => {
+["tp-left","tp-right","tp-dbl","tp-drag","tp-sup","tp-sdn"].forEach(id => {
   $(id).addEventListener("touchstart", (e) => { e.preventDefault(); $(id).click(); }, { passive: false });
 });
 

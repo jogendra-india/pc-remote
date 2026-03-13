@@ -1,6 +1,10 @@
+# Core (all platforms)
 flask>=3.0,<3.1
 flask-socketio>=5.3
 werkzeug>=3.0,<3.1
 mss>=9.0
 pyautogui>=0.9
 Pillow>=10.0
+
+# macOS only — Quartz is auto-installed with pyobjc; not needed on Windows/Linux
+# pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"

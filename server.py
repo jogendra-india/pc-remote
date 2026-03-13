@@ -1,11 +1,12 @@
 """
-MacBook Remote Desktop Server
+Remote Desktop Server — cross-platform (macOS, Windows, Linux)
 
 Streams the screen over WebSocket and accepts mouse/keyboard input
 from any browser on the same network.
 
-Uses Quartz CoreGraphics directly for mouse control (more reliable
-than pyautogui on modern macOS) and pyautogui for keyboard input.
+macOS:   Quartz CoreGraphics for mouse, caffeinate for sleep prevention
+Windows: pyautogui for mouse, SetThreadExecutionState for sleep prevention
+Linux:   pyautogui for mouse, systemd-inhibit for sleep prevention
 """
 
 import atexit
@@ -17,6 +18,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from io import BytesIO
@@ -24,11 +26,17 @@ from pathlib import Path
 
 import mss
 import pyautogui
-import Quartz
 from flask import Flask, jsonify, render_template, request, send_file
 from flask_socketio import SocketIO
 from PIL import Image
 from werkzeug.utils import secure_filename
+
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
+
+if IS_MACOS:
+    import Quartz
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
@@ -83,113 +91,152 @@ MODIFIER_KEYS = {"Shift", "Control", "Alt", "Meta"}
 
 
 # ---------------------------------------------------------------------------
-# Quartz CoreGraphics mouse controller
+# Mouse controller — Quartz on macOS, pyautogui on Windows/Linux
 # ---------------------------------------------------------------------------
 
-class MouseController:
-    """Direct CoreGraphics mouse control via Quartz."""
+if IS_MACOS:
 
-    @staticmethod
-    def move(x, y):
-        point = (float(x), float(y))
-        event = Quartz.CGEventCreateMouseEvent(
-            None, Quartz.kCGEventMouseMoved, point, Quartz.kCGMouseButtonLeft,
-        )
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    class MouseController:
+        """Direct CoreGraphics mouse control via Quartz."""
 
-    @staticmethod
-    def click(x, y, button="left"):
-        point = (float(x), float(y))
-        MouseController.move(x, y)
-        time.sleep(0.01)
-
-        if button == "right":
-            btn = Quartz.kCGMouseButtonRight
-            down_type = Quartz.kCGEventRightMouseDown
-            up_type = Quartz.kCGEventRightMouseUp
-        else:
-            btn = Quartz.kCGMouseButtonLeft
-            down_type = Quartz.kCGEventLeftMouseDown
-            up_type = Quartz.kCGEventLeftMouseUp
-
-        down = Quartz.CGEventCreateMouseEvent(None, down_type, point, btn)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-        time.sleep(0.01)
-        up = Quartz.CGEventCreateMouseEvent(None, up_type, point, btn)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
-
-    @staticmethod
-    def double_click(x, y):
-        point = (float(x), float(y))
-        btn = Quartz.kCGMouseButtonLeft
-        MouseController.move(x, y)
-        time.sleep(0.01)
-        for click_count in (1, 2):
-            down = Quartz.CGEventCreateMouseEvent(
-                None, Quartz.kCGEventLeftMouseDown, point, btn,
+        @staticmethod
+        def move(x, y):
+            point = (float(x), float(y))
+            event = Quartz.CGEventCreateMouseEvent(
+                None, Quartz.kCGEventMouseMoved, point, Quartz.kCGMouseButtonLeft,
             )
-            Quartz.CGEventSetIntegerValueField(
-                down, Quartz.kCGMouseEventClickState, click_count,
-            )
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-            up = Quartz.CGEventCreateMouseEvent(
-                None, Quartz.kCGEventLeftMouseUp, point, btn,
-            )
-            Quartz.CGEventSetIntegerValueField(
-                up, Quartz.kCGMouseEventClickState, click_count,
-            )
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+        @staticmethod
+        def click(x, y, button="left"):
+            point = (float(x), float(y))
+            MouseController.move(x, y)
             time.sleep(0.01)
 
-    @staticmethod
-    def scroll(dy):
-        event = Quartz.CGEventCreateScrollWheelEvent(
-            None, Quartz.kCGScrollEventUnitLine, 1, int(dy),
-        )
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            if button == "right":
+                btn = Quartz.kCGMouseButtonRight
+                down_type = Quartz.kCGEventRightMouseDown
+                up_type = Quartz.kCGEventRightMouseUp
+            else:
+                btn = Quartz.kCGMouseButtonLeft
+                down_type = Quartz.kCGEventLeftMouseDown
+                up_type = Quartz.kCGEventLeftMouseUp
 
-    @staticmethod
-    def drag(x, y):
-        point = (float(x), float(y))
-        event = Quartz.CGEventCreateMouseEvent(
-            None, Quartz.kCGEventLeftMouseDragged, point, Quartz.kCGMouseButtonLeft,
-        )
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            down = Quartz.CGEventCreateMouseEvent(None, down_type, point, btn)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+            time.sleep(0.01)
+            up = Quartz.CGEventCreateMouseEvent(None, up_type, point, btn)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
 
-    @staticmethod
-    def mouse_down(x, y, button="left"):
-        point = (float(x), float(y))
-        MouseController.move(x, y)
-        if button == "right":
-            btn = Quartz.kCGMouseButtonRight
-            event_type = Quartz.kCGEventRightMouseDown
-        else:
+        @staticmethod
+        def double_click(x, y):
+            point = (float(x), float(y))
             btn = Quartz.kCGMouseButtonLeft
-            event_type = Quartz.kCGEventLeftMouseDown
-        event = Quartz.CGEventCreateMouseEvent(None, event_type, point, btn)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            MouseController.move(x, y)
+            time.sleep(0.01)
+            for click_count in (1, 2):
+                down = Quartz.CGEventCreateMouseEvent(
+                    None, Quartz.kCGEventLeftMouseDown, point, btn,
+                )
+                Quartz.CGEventSetIntegerValueField(
+                    down, Quartz.kCGMouseEventClickState, click_count,
+                )
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+                up = Quartz.CGEventCreateMouseEvent(
+                    None, Quartz.kCGEventLeftMouseUp, point, btn,
+                )
+                Quartz.CGEventSetIntegerValueField(
+                    up, Quartz.kCGMouseEventClickState, click_count,
+                )
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+                time.sleep(0.01)
 
-    @staticmethod
-    def mouse_up(x, y, button="left"):
-        point = (float(x), float(y))
-        if button == "right":
-            btn = Quartz.kCGMouseButtonRight
-            event_type = Quartz.kCGEventRightMouseUp
-        else:
-            btn = Quartz.kCGMouseButtonLeft
-            event_type = Quartz.kCGEventLeftMouseUp
-        event = Quartz.CGEventCreateMouseEvent(None, event_type, point, btn)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        @staticmethod
+        def scroll(dy):
+            event = Quartz.CGEventCreateScrollWheelEvent(
+                None, Quartz.kCGScrollEventUnitLine, 1, int(dy),
+            )
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+        @staticmethod
+        def drag(x, y):
+            point = (float(x), float(y))
+            event = Quartz.CGEventCreateMouseEvent(
+                None, Quartz.kCGEventLeftMouseDragged, point, Quartz.kCGMouseButtonLeft,
+            )
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+        @staticmethod
+        def mouse_down(x, y, button="left"):
+            point = (float(x), float(y))
+            MouseController.move(x, y)
+            if button == "right":
+                btn = Quartz.kCGMouseButtonRight
+                event_type = Quartz.kCGEventRightMouseDown
+            else:
+                btn = Quartz.kCGMouseButtonLeft
+                event_type = Quartz.kCGEventLeftMouseDown
+            event = Quartz.CGEventCreateMouseEvent(None, event_type, point, btn)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+        @staticmethod
+        def mouse_up(x, y, button="left"):
+            point = (float(x), float(y))
+            if button == "right":
+                btn = Quartz.kCGMouseButtonRight
+                event_type = Quartz.kCGEventRightMouseUp
+            else:
+                btn = Quartz.kCGMouseButtonLeft
+                event_type = Quartz.kCGEventLeftMouseUp
+            event = Quartz.CGEventCreateMouseEvent(None, event_type, point, btn)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+else:
+
+    class MouseController:
+        """Cross-platform mouse control via pyautogui (Windows/Linux)."""
+
+        @staticmethod
+        def move(x, y):
+            pyautogui.moveTo(int(x), int(y), _pause=False)
+
+        @staticmethod
+        def click(x, y, button="left"):
+            pyautogui.click(int(x), int(y), button=button, _pause=False)
+
+        @staticmethod
+        def double_click(x, y):
+            pyautogui.doubleClick(int(x), int(y), _pause=False)
+
+        @staticmethod
+        def scroll(dy):
+            pyautogui.scroll(int(dy), _pause=False)
+
+        @staticmethod
+        def drag(x, y):
+            pyautogui.moveTo(int(x), int(y), _pause=False)
+
+        @staticmethod
+        def mouse_down(x, y, button="left"):
+            pyautogui.moveTo(int(x), int(y), _pause=False)
+            pyautogui.mouseDown(button=button, _pause=False)
+
+        @staticmethod
+        def mouse_up(x, y, button="left"):
+            pyautogui.moveTo(int(x), int(y), _pause=False)
+            pyautogui.mouseUp(button=button, _pause=False)
 
 
 mouse = MouseController()
 
 
 # ---------------------------------------------------------------------------
-# Permission check
+# Permission check (macOS-specific; other platforms return True)
 # ---------------------------------------------------------------------------
 
 def check_accessibility():
+    if not IS_MACOS:
+        return True
     try:
         lib = ctypes.cdll.LoadLibrary(
             "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
@@ -201,13 +248,28 @@ def check_accessibility():
 
 
 # ---------------------------------------------------------------------------
-# Clipboard helpers
+# Clipboard helpers — platform-aware
 # ---------------------------------------------------------------------------
 
 def get_clipboard():
     try:
-        result = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=5)
-        return result.stdout
+        if IS_MACOS:
+            result = subprocess.run(
+                ["pbpaste"], capture_output=True, text=True, timeout=5,
+            )
+            return result.stdout
+        elif IS_WINDOWS:
+            result = subprocess.run(
+                ["powershell", "-command", "Get-Clipboard"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.stdout.rstrip("\r\n")
+        else:
+            result = subprocess.run(
+                ["xclip", "-selection", "clipboard", "-o"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.stdout
     except Exception:
         LOGGER.exception("get_clipboard failed")
         return ""
@@ -215,7 +277,15 @@ def get_clipboard():
 
 def set_clipboard(text):
     try:
-        subprocess.run(["pbcopy"], input=text, text=True, timeout=5)
+        if IS_MACOS:
+            subprocess.run(["pbcopy"], input=text, text=True, timeout=5)
+        elif IS_WINDOWS:
+            subprocess.run(["clip"], input=text, text=True, timeout=5)
+        else:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text, text=True, timeout=5,
+            )
     except Exception:
         LOGGER.exception("set_clipboard failed")
 
@@ -451,21 +521,41 @@ def on_scroll(data):
 # Socket.IO events — keyboard
 # ---------------------------------------------------------------------------
 
-@socketio.on("keydown")
-def on_keydown(data):
-    key = data.get("key", "")
-    if key in MODIFIER_KEYS:
-        return
+# On macOS Cmd maps to pyautogui "command"; on Windows/Linux Cmd shortcuts
+# typically correspond to Ctrl (e.g. Cmd+C → Ctrl+C).  The "win" key is
+# mapped separately so the user can still press it explicitly.
+_CMD_PYAUTOGUI = "command" if IS_MACOS else "ctrl"
 
+MOD_MAP = {
+    "ctrl": "ctrl", "control": "ctrl",
+    "alt": "alt", "option": "alt",
+    "cmd": _CMD_PYAUTOGUI, "meta": _CMD_PYAUTOGUI, "command": _CMD_PYAUTOGUI,
+    "shift": "shift",
+    "win": "win" if IS_WINDOWS else "command",
+}
+
+
+def _map_modifier_flag(data):
+    """Build modifier list from boolean flags (keydown event)."""
     modifiers = []
     if data.get("meta"):
-        modifiers.append("command")
+        modifiers.append(_CMD_PYAUTOGUI)
     if data.get("ctrl"):
         modifiers.append("ctrl")
     if data.get("alt"):
         modifiers.append("alt")
     if data.get("shift"):
         modifiers.append("shift")
+    return modifiers
+
+
+@socketio.on("keydown")
+def on_keydown(data):
+    key = data.get("key", "")
+    if key in MODIFIER_KEYS:
+        return
+
+    modifiers = _map_modifier_flag(data)
 
     mapped = KEY_MAP.get(key)
     if mapped is None:
@@ -488,13 +578,7 @@ def on_hotkey(data):
     modifiers = data.get("modifiers", [])
     key = data.get("key", "")
 
-    mod_map = {
-        "ctrl": "ctrl", "control": "ctrl",
-        "alt": "alt", "option": "alt",
-        "cmd": "command", "meta": "command", "command": "command",
-        "shift": "shift",
-    }
-    mapped_mods = [mod_map[m] for m in modifiers if m in mod_map]
+    mapped_mods = [MOD_MAP[m] for m in modifiers if m in MOD_MAP]
 
     mapped_key = KEY_MAP.get(key)
     if mapped_key is None:
@@ -587,28 +671,79 @@ if __name__ == "__main__":
         LOGGER.info("Accessibility permissions: OK")
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    LOGGER.info("Platform: %s", sys.platform)
     LOGGER.info("Logical screen: %dx%d", logical_width, logical_height)
     LOGGER.info("Upload directory: %s", UPLOAD_DIR)
 
-    # Prevent display/idle/system sleep while the server is running
-    caffeinate_proc = None
-    try:
-        caffeinate_proc = subprocess.Popen(
-            ["caffeinate", "-dis"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        LOGGER.info("Caffeinate active (pid %d) — sleep is disabled", caffeinate_proc.pid)
-    except FileNotFoundError:
-        LOGGER.warning("caffeinate not found — sleep prevention unavailable")
+    # --- Prevent display/idle/system sleep while the server is running ---
+    _sleep_cleanup = None
 
-    def _stop_caffeinate():
-        if caffeinate_proc and caffeinate_proc.poll() is None:
-            caffeinate_proc.terminate()
-            LOGGER.info("Caffeinate stopped — sleep re-enabled")
+    if IS_MACOS:
+        caffeinate_proc = None
+        try:
+            caffeinate_proc = subprocess.Popen(
+                ["caffeinate", "-dis"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            LOGGER.info("Caffeinate active (pid %d) — sleep is disabled", caffeinate_proc.pid)
+        except FileNotFoundError:
+            LOGGER.warning("caffeinate not found — sleep prevention unavailable")
 
-    atexit.register(_stop_caffeinate)
-    signal.signal(signal.SIGTERM, lambda *_: (_stop_caffeinate(), os._exit(0)))
+        def _sleep_cleanup_mac():
+            if caffeinate_proc and caffeinate_proc.poll() is None:
+                caffeinate_proc.terminate()
+                LOGGER.info("Caffeinate stopped — sleep re-enabled")
+
+        _sleep_cleanup = _sleep_cleanup_mac
+
+    elif IS_WINDOWS:
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ES_DISPLAY_REQUIRED = 0x00000002
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+            )
+            LOGGER.info("SetThreadExecutionState active — sleep is disabled")
+        except Exception:
+            LOGGER.warning("SetThreadExecutionState failed — sleep prevention unavailable")
+
+        def _sleep_cleanup_win():
+            try:
+                ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+                LOGGER.info("SetThreadExecutionState cleared — sleep re-enabled")
+            except Exception:
+                pass
+
+        _sleep_cleanup = _sleep_cleanup_win
+
+    else:
+        inhibit_proc = None
+        try:
+            inhibit_proc = subprocess.Popen(
+                [
+                    "systemd-inhibit", "--what=idle:sleep",
+                    "--who=RemoteDesktop", "--reason=Server active",
+                    "sleep", "infinity",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            LOGGER.info("systemd-inhibit active (pid %d) — sleep is disabled", inhibit_proc.pid)
+        except FileNotFoundError:
+            LOGGER.warning("systemd-inhibit not found — sleep prevention unavailable")
+
+        def _sleep_cleanup_linux():
+            if inhibit_proc and inhibit_proc.poll() is None:
+                inhibit_proc.terminate()
+                LOGGER.info("systemd-inhibit stopped — sleep re-enabled")
+
+        _sleep_cleanup = _sleep_cleanup_linux
+
+    if _sleep_cleanup:
+        atexit.register(_sleep_cleanup)
+        signal.signal(signal.SIGTERM, lambda *_: (_sleep_cleanup(), os._exit(0)))
 
     stream_thread = threading.Thread(target=capture_and_stream, daemon=True)
     stream_thread.start()
@@ -616,8 +751,9 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
     port = 5050
 
+    platform_name = "macOS" if IS_MACOS else "Windows" if IS_WINDOWS else "Linux"
     print(f"\n{'=' * 54}")
-    print("  MacBook Remote Desktop")
+    print(f"  Remote Desktop Server ({platform_name})")
     print(f"{'=' * 54}")
     print(f"  Local:   http://localhost:{port}")
     print(f"  Network: http://{local_ip}:{port}")

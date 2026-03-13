@@ -390,7 +390,7 @@ html, body {
   </div>
 </div>
 
-<input id="kb-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+<textarea id="kb-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" rows="1"></textarea>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
 <script>
@@ -920,58 +920,50 @@ function handleKeyDown(e) {
 }
 canvas.addEventListener("keydown", handleKeyDown);
 
-// NKB — dedup flag: when keydown successfully handles a key, suppress the input event
-let _nkbKeydownHandled = false;
-
+// NKB keydown — ONLY intercepts special keys and modifier combos.
+// Printable characters flow through to the "input" event instead.
 $("kb-input").addEventListener("keydown", (e) => {
   if (!isConnected) return;
   e.stopPropagation();
   if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
-
-  // On mobile soft keyboards e.key is often "Unidentified" — skip and let
-  // the input event handle it instead
   if (e.key === "Unidentified" || e.key === "Process") return;
 
+  const hasActionMod = e.ctrlKey || mods.ctrl || e.altKey || mods.alt || e.metaKey || mods.cmd;
+  const isSpecialKey = e.key.length > 1; // "Enter", "Escape", "ArrowUp", "F1", etc.
+
+  if (!hasActionMod && !isSpecialKey) return; // let input event handle printable chars
+
   e.preventDefault();
-  _nkbKeydownHandled = true;
 
   const allMods = buildModList(e);
   const hadSticky = mods.ctrl || mods.alt || mods.cmd || mods.shift;
 
-  // For printable chars with ONLY shift (no ctrl/alt/cmd), send via type_text
-  // which already handles uppercase on the server side
-  const onlyShift = allMods.length === 1 && allMods[0] === "shift"
-                    && !mods.ctrl && !mods.alt && !mods.cmd;
-  if (e.key.length === 1 && (allMods.length === 0 || onlyShift)) {
-    socket.emit("type_text", { text: e.key });
-    if (hadSticky) releaseMods();
-  } else if (allMods.length > 0) {
+  if (allMods.length > 0) {
     socket.emit("hotkey", { modifiers: allMods, key: e.key });
-    if (hadSticky) releaseMods();
   } else {
     socket.emit("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
   }
+  if (hadSticky) releaseMods();
 });
 
-// Mobile soft keyboards fire "input" instead of reliable keydown
+// NKB input — handles ALL printable characters (desktop and mobile).
+// Processes every character in the buffer so fast typing never loses chars.
 $("kb-input").addEventListener("input", () => {
-  if (_nkbKeydownHandled) {
-    _nkbKeydownHandled = false;
-    $("kb-input").value = "";
-    return;
-  }
   const v = $("kb-input").value;
-  if (v.length > 0) {
+  if (!v) return;
+  $("kb-input").value = "";
+
+  const activeMods = getActiveMods();
+  if (activeMods.length > 0) {
+    // With sticky mods, apply them to the last character only
     const ch = v.charAt(v.length - 1);
-    const activeMods = getActiveMods();
-    if (activeMods.length > 0) {
-      socket.emit("hotkey", { modifiers: activeMods, key: ch });
-      releaseMods();
-    } else {
-      // type_text handles uppercase/shifted chars correctly on the server
-      socket.emit("type_text", { text: ch });
-    }
-    $("kb-input").value = "";
+    socket.emit("hotkey", { modifiers: activeMods, key: ch });
+    releaseMods();
+    // Send any preceding characters as plain text
+    if (v.length > 1) socket.emit("type_text", { text: v.slice(0, -1) });
+  } else {
+    // Send all characters at once — type_text handles uppercase correctly
+    socket.emit("type_text", { text: v });
   }
 });
 
@@ -991,7 +983,9 @@ $("btn-nkb").onclick = () => {
 };
 // Re-focus NKB input if it loses focus while NKB mode is active
 $("kb-input").addEventListener("blur", () => {
-  if (nkbActive) setTimeout(() => $("kb-input").focus(), 100);
+  if (nkbActive) setTimeout(() => {
+    if (nkbActive && document.activeElement === document.body) $("kb-input").focus();
+  }, 200);
 });
 
 // Settings

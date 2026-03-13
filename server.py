@@ -67,7 +67,8 @@ settings = {
 }
 
 KEY_MAP = {
-    "Enter": "enter",
+    "Enter": "return",
+    "Return": "return",
     "Backspace": "backspace",
     "Tab": "tab",
     "Escape": "escape",
@@ -534,6 +535,25 @@ MOD_MAP = {
     "win": "win" if IS_WINDOWS else "command",
 }
 
+def _send_key_combo(modifiers, mapped_key):
+    """Send key with modifiers using keyDown/press/keyUp for reliability."""
+    if not modifiers:
+        pyautogui.press(mapped_key, _pause=False)
+        return
+
+    # Alt+Enter has shown issues on some systems when sent directly with hotkey(),
+    # so use explicit press sequence.
+    for m in modifiers:
+        pyautogui.keyDown(m, _pause=False)
+    try:
+        if mapped_key in ("enter", "return"):
+            pyautogui.keyDown(mapped_key, _pause=False)
+            pyautogui.keyUp(mapped_key, _pause=False)
+        else:
+            pyautogui.press(mapped_key, _pause=False)
+    finally:
+        for m in reversed(modifiers):
+            pyautogui.keyUp(m, _pause=False)
 
 def _map_modifier_flag(data):
     """Build modifier list from boolean flags (keydown event)."""
@@ -564,10 +584,7 @@ def on_keydown(data):
         return
 
     try:
-        if modifiers:
-            pyautogui.hotkey(*modifiers, mapped, _pause=False)
-        else:
-            pyautogui.press(mapped, _pause=False)
+        _send_key_combo(modifiers, mapped)
     except Exception:
         LOGGER.exception("keydown error key=%s mods=%s", key, modifiers)
 
@@ -587,10 +604,7 @@ def on_hotkey(data):
         return
 
     try:
-        if mapped_mods:
-            pyautogui.hotkey(*mapped_mods, mapped_key, _pause=False)
-        else:
-            pyautogui.press(mapped_key, _pause=False)
+        _send_key_combo(mapped_mods, mapped_key)
     except Exception:
         LOGGER.exception("hotkey error mods=%s key=%s", modifiers, key)
 
@@ -602,6 +616,10 @@ def on_type_text(data):
     if not text:
         return
     for ch in text:
+        if ch == "\n":
+            pyautogui.press("enter", _pause=False)
+            time.sleep(0.02)
+            continue
         mapped = KEY_MAP.get(ch)
         if mapped is None and len(ch) == 1:
             mapped = ch.lower()
@@ -652,11 +670,18 @@ def on_update_settings(data):
 # Main
 # ---------------------------------------------------------------------------
 
+class _WebSocketUpgradeFilter(logging.Filter):
+    """Suppress the harmless werkzeug assertion during WebSocket upgrades."""
+    def filter(self, record):
+        return "write() before start_response" not in record.getMessage()
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
     )
+    logging.getLogger("werkzeug").addFilter(_WebSocketUpgradeFilter())
 
     accessible = check_accessibility()
     if accessible is False:

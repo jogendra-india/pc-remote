@@ -77,9 +77,9 @@ settings = {
 audio_active = False
 audio_thread = None
 audio_lock = threading.Lock()
-AUDIO_SAMPLE_RATE = 22050
+AUDIO_SAMPLE_RATE = 44100
 AUDIO_CHANNELS = 1
-AUDIO_CHUNK = 2048
+AUDIO_CHUNK = 4096
 audio_device_index = None
 
 KEY_MAP = {
@@ -215,14 +215,21 @@ else:
 
         @staticmethod
         def move(x, y):
-            pyautogui.moveTo(int(x), int(y), _pause=False)
+            if IS_WINDOWS:
+                ctypes.windll.user32.SetCursorPos(int(x), int(y))
+            else:
+                pyautogui.moveTo(int(x), int(y), _pause=False)
 
         @staticmethod
         def click(x, y, button="left"):
+            if IS_WINDOWS:
+                ctypes.windll.user32.SetCursorPos(int(x), int(y))
             pyautogui.click(int(x), int(y), button=button, _pause=False)
 
         @staticmethod
         def double_click(x, y):
+            if IS_WINDOWS:
+                ctypes.windll.user32.SetCursorPos(int(x), int(y))
             pyautogui.doubleClick(int(x), int(y), _pause=False)
 
         @staticmethod
@@ -231,16 +238,24 @@ else:
 
         @staticmethod
         def drag(x, y):
+            if IS_WINDOWS:
+                ctypes.windll.user32.SetCursorPos(int(x), int(y))
             pyautogui.moveTo(int(x), int(y), _pause=False)
 
         @staticmethod
         def mouse_down(x, y, button="left"):
-            pyautogui.moveTo(int(x), int(y), _pause=False)
+            if IS_WINDOWS:
+                ctypes.windll.user32.SetCursorPos(int(x), int(y))
+            else:
+                pyautogui.moveTo(int(x), int(y), _pause=False)
             pyautogui.mouseDown(button=button, _pause=False)
 
         @staticmethod
         def mouse_up(x, y, button="left"):
-            pyautogui.moveTo(int(x), int(y), _pause=False)
+            if IS_WINDOWS:
+                ctypes.windll.user32.SetCursorPos(int(x), int(y))
+            else:
+                pyautogui.moveTo(int(x), int(y), _pause=False)
             pyautogui.mouseUp(button=button, _pause=False)
 
 

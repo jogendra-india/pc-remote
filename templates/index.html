@@ -347,14 +347,14 @@ html, body {
   <!-- Clipboard -->
   <div id="panel-clip" class="panel-page">
     <div class="clip-section">
-      <textarea id="clip-text" placeholder="Paste text here from your phone (long-press → Paste), then tap 'Send to Mac &amp; Paste'"></textarea>
+      <textarea id="clip-text" placeholder="Paste text here from your phone (long-press → Paste), then tap 'Send to PC &amp; Paste'"></textarea>
       <div class="clip-actions">
         <button id="clip-read-phone">Read Phone Clipboard</button>
-        <button id="clip-get">Get Mac Clipboard</button>
+        <button id="clip-get">Get PC Clipboard</button>
       </div>
       <div class="clip-actions" style="margin-top:4px">
-        <button id="clip-set">Set Mac Clipboard</button>
-        <button id="clip-paste" class="primary">Send to Mac &amp; Paste</button>
+        <button id="clip-set">Set PC Clipboard</button>
+        <button id="clip-paste" class="primary">Send to PC &amp; Paste</button>
       </div>
     </div>
   </div>
@@ -364,7 +364,7 @@ html, body {
     <div class="file-section">
       <div class="file-upload-row">
         <input type="file" id="file-input" multiple>
-        <button class="file-upload-btn" id="file-upload-btn">Upload to Mac</button>
+        <button class="file-upload-btn" id="file-upload-btn">Upload to PC</button>
       </div>
       <div class="file-path-bar">
         <button id="file-up">&uarr; Up</button>
@@ -725,14 +725,14 @@ $("tp-sdn").onclick = () => socket.emit("scroll", { dy: -5 });
 
 // ===== Clipboard =====
 socket.on("clipboard_content", (d) => { $("clip-text").value = d.text || ""; });
-$("clip-get").onclick = () => { socket.emit("clipboard_get"); showToast("Fetching Mac clipboard..."); };
-$("clip-set").onclick = () => { socket.emit("clipboard_set", { text: $("clip-text").value }); showToast("Mac clipboard set"); };
+$("clip-get").onclick = () => { socket.emit("clipboard_get"); showToast("Fetching PC clipboard..."); };
+$("clip-set").onclick = () => { socket.emit("clipboard_set", { text: $("clip-text").value }); showToast("PC clipboard set"); };
 $("clip-paste").onclick = () => {
   const text = $("clip-text").value;
   if (!text) { showToast("Text area is empty — paste your phone text first"); return; }
   socket.emit("clipboard_set", { text });
   setTimeout(() => socket.emit("hotkey", { modifiers: ["cmd"], key: "v" }), 150);
-  showToast("Pasting on Mac...");
+  showToast("Pasting on PC...");
 };
 $("clip-read-phone").onclick = async () => {
   try {

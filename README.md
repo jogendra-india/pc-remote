@@ -183,9 +183,9 @@ The clipboard panel lets you transfer text between your phone and the remote mac
 | Button | What it does |
 |---|---|
 | **Read Phone Clipboard** | Reads text from your phone's clipboard into the text area (requires HTTPS or localhost) |
-| **Get Mac Clipboard** | Fetches the current clipboard content from the remote machine |
-| **Set Mac Clipboard** | Sends the text area content to the remote machine's clipboard |
-| **Send to Mac & Paste** | Sets the remote clipboard AND sends Cmd+V / Ctrl+V to paste it |
+| **Get PC Clipboard** | Fetches the current clipboard content from the remote machine |
+| **Set PC Clipboard** | Sends the text area content to the remote machine's clipboard |
+| **Send to PC & Paste** | Sets the remote clipboard AND sends Cmd+V / Ctrl+V to paste it |
 
 > **Tip**: If "Read Phone Clipboard" doesn't work (non-HTTPS), long-press the text area and paste manually.
 
@@ -193,7 +193,7 @@ The clipboard panel lets you transfer text between your phone and the remote mac
 
 The file panel provides:
 
-- **Upload to Mac** — select files from your phone and upload them to `~/Desktop/RemoteUploads/` on the remote machine (max 500 MB per file)
+- **Upload to PC** — select files from your phone and upload them to `~/Desktop/RemoteUploads/` on the remote machine (max 500 MB per file)
 - **Browse files** — navigate the remote machine's home directory
 - **Download** — tap the download arrow next to any file to save it to your phone
 

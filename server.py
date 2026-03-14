@@ -224,13 +224,25 @@ else:
         def click(x, y, button="left"):
             if IS_WINDOWS:
                 ctypes.windll.user32.SetCursorPos(int(x), int(y))
-            pyautogui.click(int(x), int(y), button=button, _pause=False)
+                if button == "right":
+                    ctypes.windll.user32.mouse_event(0x0008, 0, 0, 0, 0) # RIGHTDOWN
+                    ctypes.windll.user32.mouse_event(0x0010, 0, 0, 0, 0) # RIGHTUP
+                else:
+                    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0) # LEFTDOWN
+                    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0) # LEFTUP
+            else:
+                pyautogui.click(int(x), int(y), button=button, _pause=False)
 
         @staticmethod
         def double_click(x, y):
             if IS_WINDOWS:
                 ctypes.windll.user32.SetCursorPos(int(x), int(y))
-            pyautogui.doubleClick(int(x), int(y), _pause=False)
+                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
+                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
+                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
+                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
+            else:
+                pyautogui.doubleClick(int(x), int(y), _pause=False)
 
         @staticmethod
         def scroll(dy):
@@ -240,23 +252,32 @@ else:
         def drag(x, y):
             if IS_WINDOWS:
                 ctypes.windll.user32.SetCursorPos(int(x), int(y))
-            pyautogui.moveTo(int(x), int(y), _pause=False)
+            else:
+                pyautogui.moveTo(int(x), int(y), _pause=False)
 
         @staticmethod
         def mouse_down(x, y, button="left"):
             if IS_WINDOWS:
                 ctypes.windll.user32.SetCursorPos(int(x), int(y))
+                if button == "right":
+                    ctypes.windll.user32.mouse_event(0x0008, 0, 0, 0, 0)
+                else:
+                    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
             else:
                 pyautogui.moveTo(int(x), int(y), _pause=False)
-            pyautogui.mouseDown(button=button, _pause=False)
+                pyautogui.mouseDown(button=button, _pause=False)
 
         @staticmethod
         def mouse_up(x, y, button="left"):
             if IS_WINDOWS:
                 ctypes.windll.user32.SetCursorPos(int(x), int(y))
+                if button == "right":
+                    ctypes.windll.user32.mouse_event(0x0010, 0, 0, 0, 0)
+                else:
+                    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
             else:
                 pyautogui.moveTo(int(x), int(y), _pause=False)
-            pyautogui.mouseUp(button=button, _pause=False)
+                pyautogui.mouseUp(button=button, _pause=False)
 
 
 mouse = MouseController()

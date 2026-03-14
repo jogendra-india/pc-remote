@@ -748,6 +748,7 @@ tpArea.addEventListener("touchend", (e) => {
     tpArea.textContent = tpDragMode
       ? "Drag mode ON \u2014 touch to grab & drag"
       : "Drag to move cursor \u00b7 Tap to click";
+    if (elapsed < 250 && dist < 12 && !tpDragMode) socket.emit("dblclick", {x: cursorX, y: cursorY});
   } else if (elapsed < 250 && dist < 12) {
     tpLastTapTime = Date.now();
     socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
@@ -898,6 +899,8 @@ canvasWrap.addEventListener("wheel", (e) => {
 let tStartTime = 0, tStartXY = {x:0,y:0}, tMoved = false, trackpadLP = null;
 let pinchActive = false, lastPinchDist = 0, pinchBaseZoom = 1;
 let twoFingerMid = null;
+let lastCanvasTapTime = 0;
+let canvasDragging = false;
 
 function pDist(a,b) { return Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY); }
 function midpoint(a,b) { return { x:(a.clientX+b.clientX)/2, y:(a.clientY+b.clientY)/2 }; }
@@ -914,7 +917,15 @@ canvas.addEventListener("touchstart", (e) => {
   if (e.touches.length !== 1) return;
   const t = e.touches[0], c = canvasCoords(t.clientX, t.clientY);
   tStartTime = Date.now(); tStartXY = {x:t.clientX,y:t.clientY}; tMoved = false;
-  if (interactionMode === "direct") { cursorX = c.x; cursorY = c.y; emitMove(c); }
+  if (interactionMode === "direct") {
+    cursorX = c.x; cursorY = c.y;
+    if (tStartTime - lastCanvasTapTime < 350) {
+      canvasDragging = true;
+      socket.emit("mousedown", {...c, btn: "left"});
+    } else {
+      emitMove(c);
+    }
+  }
   else trackpadLP = {x:t.clientX,y:t.clientY};
 }, { passive: false });
 
@@ -943,7 +954,10 @@ canvas.addEventListener("touchmove", (e) => {
   if (e.touches.length !== 1) return;
   tMoved = true;
   const t = e.touches[0];
-  if (interactionMode === "direct") { const c = canvasCoords(t.clientX, t.clientY); cursorX = c.x; cursorY = c.y; emitMove(c); }
+  if (interactionMode === "direct") {
+    const c = canvasCoords(t.clientX, t.clientY); cursorX = c.x; cursorY = c.y;
+    if (canvasDragging) socket.emit("drag", c); else emitMove(c);
+  }
   else if (trackpadLP) {
     const r = canvas.getBoundingClientRect();
     cursorX = Math.max(0, Math.min(1, cursorX + (t.clientX-trackpadLP.x)/r.width*cursorSens));
@@ -959,8 +973,14 @@ canvas.addEventListener("touchend", (e) => {
   if (e.touches.length > 0) return;
   const t = e.changedTouches[0], elapsed = Date.now()-tStartTime;
   const dist = Math.hypot(t.clientX-tStartXY.x, t.clientY-tStartXY.y);
-  if (elapsed < 300 && dist < 15) {
-    const c = interactionMode === "direct" ? canvasCoords(t.clientX, t.clientY) : {x:cursorX,y:cursorY};
+  const c = interactionMode === "direct" ? canvasCoords(t.clientX, t.clientY) : {x:cursorX,y:cursorY};
+
+  if (interactionMode === "direct" && canvasDragging) {
+    socket.emit("mouseup", {...c, btn:"left"});
+    canvasDragging = false;
+    if (elapsed < 250 && dist < 15) socket.emit("dblclick", c);
+  } else if (elapsed < 300 && dist < 15) {
+    lastCanvasTapTime = Date.now();
     socket.emit("click", {...c, btn:"left"});
   }
   trackpadLP = null;

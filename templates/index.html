@@ -47,9 +47,12 @@ html, body {
 }
 .tb:hover { background:var(--border); color:var(--text); }
 .tb.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.tb.audio-active { background:var(--green); color:#000; border-color:var(--green); }
 .zoom-g { display:flex; align-items:center; gap:3px; flex-shrink:0; }
 .zoom-g .tb { padding:4px 6px; font-weight:700; }
 #zoom-label { font-size:11px; color:var(--text); min-width:32px; text-align:center; }
+#latency-display { font-size:10px; color:var(--green); white-space:nowrap; flex-shrink:0; font-variant-numeric:tabular-nums; }
+#frame-info { font-size:10px; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
 
 /* ---- Canvas ---- */
 #canvas-wrap {
@@ -57,7 +60,11 @@ html, body {
   bottom:var(--panel-h); background:#000; overflow:auto; touch-action:none;
   transition:bottom .2s;
 }
-#canvas-center { display:flex; align-items:center; justify-content:center; min-width:100%; min-height:100%; }
+#canvas-center {
+  display:flex; align-items:flex-start; justify-content:center;
+  min-width:100%; min-height:100%;
+  padding-top:12px; padding-bottom:60vh;
+}
 #screen { display:block; cursor:none; flex-shrink:0; }
 
 /* ---- Bottom Panel Container ---- */
@@ -167,13 +174,17 @@ html, body {
 #settings-overlay.open { display:flex; }
 #settings-panel {
   background:var(--surface); border:1px solid var(--border); border-radius:12px;
-  padding:20px; width:300px; max-width:90vw;
+  padding:20px; width:340px; max-width:90vw; max-height:90vh; overflow-y:auto;
 }
 #settings-panel h2 { font-size:15px; margin-bottom:16px; }
 .sr { margin-bottom:12px; }
 .sr label { display:flex; justify-content:space-between; font-size:12px; color:var(--text-dim); margin-bottom:4px; }
 .sr label span { color:var(--text); font-weight:600; }
 .sr input[type=range] { width:100%; accent-color:var(--accent); }
+.sr select {
+  width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border);
+  border-radius:6px; padding:5px 8px; font-size:12px; outline:none;
+}
 .sa { display:flex; gap:6px; margin-top:16px; }
 .sa button { flex:1; padding:7px; border-radius:6px; border:1px solid var(--border); font-size:12px; cursor:pointer; }
 .sa .apply { background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -212,7 +223,9 @@ html, body {
 <div id="toolbar">
   <div class="status-dot" id="status-dot"></div>
   <span class="tl" id="status-text">Disconnected</span>
+  <span id="latency-display"></span>
   <span class="tl" id="fps-display"></span>
+  <span id="frame-info"></span>
   <span class="spacer"></span>
   <div class="zoom-g">
     <button class="tb" id="btn-zo" title="Zoom out">&minus;</button>
@@ -226,6 +239,9 @@ html, body {
   <button class="tb" id="btn-p-clip" title="Clipboard">Clip</button>
   <button class="tb" id="btn-p-files" title="File transfer">Files</button>
   <button class="tb" id="btn-nkb" title="Native keyboard">NKB</button>
+  <button class="tb" id="btn-audio" title="Audio">&#128266;</button>
+  <button class="tb" id="btn-screenshot" title="Screenshot">&#128247;</button>
+  <button class="tb" id="btn-fullscreen" title="Fullscreen">&#9974;</button>
   <button class="tb" id="btn-settings" title="Settings">&#9881;</button>
 </div>
 
@@ -274,6 +290,7 @@ html, body {
         <button class="vk-key shortcut" data-hk="cmd+shift+f">&#8984;&#8679;F</button>
         <button class="vk-key shortcut" data-hk="cmd+shift+e">&#8984;&#8679;E</button>
         <button class="vk-key shortcut" data-hk="cmd+shift+k">&#8984;&#8679;K</button>
+        <button class="vk-key shortcut" data-hk="alt+Enter">&#8997;&#9166;</button>
         <button class="vk-key shortcut" data-hk="cmd+d">&#8984;D</button>
         <button class="vk-key shortcut" data-hk="cmd+/">&#8984;/</button>
         <button class="vk-key shortcut" data-hk="alt+shift+f">&#8997;&#8679;F</button>
@@ -380,9 +397,20 @@ html, body {
 <div id="settings-overlay">
   <div id="settings-panel">
     <h2>Stream Settings</h2>
-    <div class="sr"><label>FPS <span id="val-fps">15</span></label><input type="range" id="sl-fps" min="1" max="30" value="15"></div>
-    <div class="sr"><label>Quality <span id="val-q">50</span></label><input type="range" id="sl-q" min="10" max="100" value="50"></div>
-    <div class="sr"><label>Scale <span id="val-s">0.50</span></label><input type="range" id="sl-s" min="25" max="100" value="50"></div>
+    <div class="sr"><label>FPS <span id="val-fps">15</span></label><input type="range" id="sl-fps" min="1" max="60" value="15"></div>
+    <div class="sr"><label>Quality <span id="val-q">70</span></label><input type="range" id="sl-q" min="10" max="100" value="70"></div>
+    <div class="sr"><label>Scale <span id="val-s">0.75</span></label><input type="range" id="sl-s" min="10" max="200" value="75" step="5"></div>
+    <div class="sr"><label>Format</label>
+      <select id="sel-fmt">
+        <option value="webp" selected>WebP (best balance)</option>
+        <option value="jpeg">JPEG (fastest)</option>
+        <option value="png">PNG (lossless, slowest)</option>
+      </select>
+    </div>
+    <div class="sr" id="audio-device-row" style="display:none">
+      <label>Audio Device</label>
+      <select id="sel-audio-device"><option value="">Loading...</option></select>
+    </div>
     <div class="sa">
       <button class="cancel" id="s-cancel">Cancel</button>
       <button class="apply" id="s-apply">Apply</button>
@@ -403,15 +431,27 @@ const canvasWrap = $("canvas-wrap"), canvasCenter = $("canvas-center");
 const bottomPanel = $("bottom-panel");
 const toast = $("toast");
 
+// ===== localStorage helpers =====
+const STORAGE_KEY = "macbook_remote_settings";
+function loadSavedSettings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function saveSettings(s) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {}
+}
+
 // ===== State =====
 let screenW = 1, screenH = 1;
 let cursorX = 0.5, cursorY = 0.5;
 let isConnected = false;
-let frameCount = 0;
+let frameCount = 0, lastFrameBytes = 0;
 let interactionMode = "direct";
 
 // Zoom
-const ZOOM_MIN = 0.5, ZOOM_MAX = 5.0, ZOOM_STEP = 0.25;
+const ZOOM_MIN = 0.25, ZOOM_MAX = 5.0, ZOOM_STEP = 0.25;
 let zoomLevel = 1, baseFitW = 100, baseFitH = 100;
 
 // Sticky modifiers
@@ -421,6 +461,13 @@ const mods = { ctrl: false, alt: false, cmd: false, shift: false };
 let activePanel = null;
 const PANEL_HEIGHT = 300;
 
+// Audio
+let audioActive = false;
+let audioCtx = null, audioProcessor = null, audioQueue = [];
+
+// Latency
+let latencyMs = 0;
+
 // ===== Socket =====
 const socket = io({ transports: ["websocket", "polling"] });
 
@@ -429,6 +476,25 @@ socket.on("connect", () => {
   $("status-dot").classList.add("connected");
   $("status-text").textContent = "Connected";
   setTimeout(() => $("connect-banner").classList.add("hidden"), 400);
+
+  // Send saved settings to server on connect
+  const saved = loadSavedSettings();
+  if (saved) {
+    socket.emit("update_settings", {
+      fps: saved.fps || 15,
+      quality: saved.quality || 70,
+      scale: (saved.scale || 75) / 100,
+      format: saved.format || "webp",
+    });
+    // Restore UI
+    $("sl-fps").value = saved.fps || 15;
+    $("sl-q").value = saved.quality || 70;
+    $("sl-s").value = saved.scale || 75;
+    $("sel-fmt").value = saved.format || "webp";
+    $("val-fps").textContent = saved.fps || 15;
+    $("val-q").textContent = saved.quality || 70;
+    $("val-s").textContent = ((saved.scale || 75) / 100).toFixed(2);
+  }
 });
 socket.on("disconnect", () => {
   isConnected = false;
@@ -438,9 +504,9 @@ socket.on("disconnect", () => {
 });
 socket.on("screen_info", (d) => { screenW = d.width; screenH = d.height; });
 
-// ===== Frames =====
+// ===== Frames with requestAnimationFrame =====
 const frameImg = new Image();
-let framePending = false, firstFrame = true;
+let framePending = false, firstFrame = true, newFrameReady = false;
 
 frameImg.onload = () => {
   if (canvas.width !== frameImg.width || canvas.height !== frameImg.height) {
@@ -448,19 +514,36 @@ frameImg.onload = () => {
     canvas.height = frameImg.height;
     if (firstFrame) { firstFrame = false; recalcFit(); applyZoom(); }
   }
-  ctx.drawImage(frameImg, 0, 0);
-  drawCursor();
+  newFrameReady = true;
   framePending = false;
   frameCount++;
 };
+
+function renderLoop() {
+  if (newFrameReady) {
+    ctx.drawImage(frameImg, 0, 0);
+    drawCursor();
+    newFrameReady = false;
+  }
+  requestAnimationFrame(renderLoop);
+}
+requestAnimationFrame(renderLoop);
+
 socket.on("frame", (d) => {
   if (framePending) return;
   framePending = true;
   screenW = d.w; screenH = d.h;
-  frameImg.src = "data:image/jpeg;base64," + d.img;
+  const mime = d.fmt || "image/jpeg";
+  lastFrameBytes = d.img.length * 0.75; // approximate decoded size
+  frameImg.src = "data:" + mime + ";base64," + d.img;
 });
 
-setInterval(() => { $("fps-display").textContent = frameCount + " FPS"; frameCount = 0; }, 1000);
+setInterval(() => {
+  $("fps-display").textContent = frameCount + " FPS";
+  const kb = Math.round(lastFrameBytes / 1024);
+  $("frame-info").textContent = kb > 0 ? "~" + kb + "KB/f" : "";
+  frameCount = 0;
+}, 1000);
 
 // ===== Cursor =====
 function drawCursor() {
@@ -509,7 +592,6 @@ function openPanel(id) {
   document.documentElement.style.setProperty("--panel-h", PANEL_HEIGHT + "px");
   bottomPanel.classList.add("open");
   activePanel = id;
-  // highlight active toolbar button
   ["btn-p-kb","btn-p-tp","btn-p-clip","btn-p-files"].forEach(b => $(b).classList.remove("active"));
   const btnMap = {"panel-kb":"btn-p-kb","panel-tp":"btn-p-tp","panel-clip":"btn-p-clip","panel-files":"btn-p-files"};
   if (btnMap[id]) $(btnMap[id]).classList.add("active");
@@ -605,10 +687,10 @@ $("vk-text-input").addEventListener("keydown", (e) => {
 // ===== Virtual Trackpad =====
 const tpArea = $("trackpad-area");
 let tpLast = null, tpStart = null, tpStartTime = 0;
-let tpDragMode = false; // "Drag" toggle is active
-let tpDragging = false; // currently in a drag gesture (mousedown sent)
-let tpLastTapTime = 0;  // for tap-tap-hold detection
-const TAP_TAP_WINDOW = 350; // ms between taps to trigger hold-drag
+let tpDragMode = false;
+let tpDragging = false;
+let tpLastTapTime = 0;
+const TAP_TAP_WINDOW = 350;
 
 function tpMoveCursor(t) {
   if (!tpLast) return;
@@ -627,7 +709,6 @@ tpArea.addEventListener("touchstart", (e) => {
   tpStart = { x: t.clientX, y: t.clientY };
   tpStartTime = Date.now();
 
-  // Tap-tap-hold: if second tap arrives within window, start drag immediately
   if (!tpDragMode && (tpStartTime - tpLastTapTime) < TAP_TAP_WINDOW) {
     tpDragging = true;
     socket.emit("mousedown", { x: cursorX, y: cursorY, btn: "left" });
@@ -666,14 +747,13 @@ tpArea.addEventListener("touchend", (e) => {
       ? "Drag mode ON \u2014 touch to grab & drag"
       : "Drag to move cursor \u00b7 Tap to click";
   } else if (elapsed < 250 && dist < 12) {
-    // Quick tap — record time for tap-tap-hold detection, then fire click
     tpLastTapTime = Date.now();
     socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
   }
   tpLast = null;
 }, { passive: false });
 
-// Mouse support on trackpad area (for desktop testing)
+// Mouse support on trackpad area
 let tpMouseDown = false, tpMouseLast = null;
 tpArea.addEventListener("mousedown", (e) => {
   tpMouseDown = true;
@@ -718,7 +798,6 @@ $("tp-drag").onclick = () => {
 $("tp-sup").onclick = () => socket.emit("scroll", { dy: 5 });
 $("tp-sdn").onclick = () => socket.emit("scroll", { dy: -5 });
 
-// Touch versions for trackpad buttons
 ["tp-left","tp-right","tp-dbl","tp-drag","tp-sup","tp-sdn"].forEach(id => {
   $(id).addEventListener("touchstart", (e) => { e.preventDefault(); $(id).click(); }, { passive: false });
 });
@@ -770,7 +849,7 @@ function loadFiles(path) {
       }
       list.appendChild(row);
     });
-  }).catch(e => showToast("Failed to load files"));
+  }).catch(() => showToast("Failed to load files"));
 }
 
 $("file-upload-btn").onclick = () => {
@@ -782,7 +861,7 @@ $("file-upload-btn").onclick = () => {
     fd.append("file", f);
     fetch("/upload", { method: "POST", body: fd })
       .then(r => r.json())
-      .then(d => { done++; if (done === files.length) { showToast(done + " file(s) uploaded"); loadFiles(currentFilePath); } })
+      .then(() => { done++; if (done === files.length) { showToast(done + " file(s) uploaded"); loadFiles(currentFilePath); } })
       .catch(() => showToast("Upload failed"));
   }
 };
@@ -844,17 +923,14 @@ canvas.addEventListener("touchmove", (e) => {
     const d = pDist(e.touches[0], e.touches[1]);
     if (lastPinchDist > 0) setZoom(pinchBaseZoom * d / lastPinchDist);
 
-    // Two-finger pan: track midpoint movement
     const mid = midpoint(e.touches[0], e.touches[1]);
     if (twoFingerMid) {
       const dx = mid.x - twoFingerMid.x;
       const dy = mid.y - twoFingerMid.y;
       if (zoomLevel > 1.01) {
-        // Pan the zoomed viewport
         canvasWrap.scrollLeft -= dx;
         canvasWrap.scrollTop -= dy;
       } else {
-        // Remote scroll when at fit-to-screen
         if (Math.abs(dy) > 3) {
           socket.emit("scroll", { dy: dy > 0 ? -1 : 1 });
         }
@@ -890,7 +966,6 @@ canvas.addEventListener("touchend", (e) => {
 }, { passive: false });
 
 // ===== Keyboard =====
-// Helper: merge physical event modifiers with sticky (virtual keyboard) modifiers
 function buildModList(e) {
   const allMods = [];
   if (e.ctrlKey  || mods.ctrl)  allMods.push("ctrl");
@@ -900,7 +975,6 @@ function buildModList(e) {
   return allMods;
 }
 
-// Canvas keyboard handler — also applies sticky modifiers
 function handleKeyDown(e) {
   if (!isConnected) return;
   if ($("settings-overlay").classList.contains("open")) return;
@@ -920,8 +994,7 @@ function handleKeyDown(e) {
 }
 canvas.addEventListener("keydown", handleKeyDown);
 
-// NKB keydown — ONLY intercepts special keys and modifier combos.
-// Printable characters flow through to the "input" event instead.
+// NKB keydown
 $("kb-input").addEventListener("keydown", (e) => {
   if (!isConnected) return;
   e.stopPropagation();
@@ -929,9 +1002,9 @@ $("kb-input").addEventListener("keydown", (e) => {
   if (e.key === "Unidentified" || e.key === "Process") return;
 
   const hasActionMod = e.ctrlKey || mods.ctrl || e.altKey || mods.alt || e.metaKey || mods.cmd;
-  const isSpecialKey = e.key.length > 1; // "Enter", "Escape", "ArrowUp", "F1", etc.
+  const isSpecialKey = e.key.length > 1;
 
-  if (!hasActionMod && !isSpecialKey) return; // let input event handle printable chars
+  if (!hasActionMod && !isSpecialKey) return;
 
   e.preventDefault();
 
@@ -946,8 +1019,7 @@ $("kb-input").addEventListener("keydown", (e) => {
   if (hadSticky) releaseMods();
 });
 
-// NKB input — handles ALL printable characters (desktop and mobile).
-// Processes every character in the buffer so fast typing never loses chars.
+// NKB input
 $("kb-input").addEventListener("input", () => {
   const v = $("kb-input").value;
   if (!v) return;
@@ -955,14 +1027,11 @@ $("kb-input").addEventListener("input", () => {
 
   const activeMods = getActiveMods();
   if (activeMods.length > 0) {
-    // With sticky mods, apply them to the last character only
     const ch = v.charAt(v.length - 1);
     socket.emit("hotkey", { modifiers: activeMods, key: ch });
     releaseMods();
-    // Send any preceding characters as plain text
     if (v.length > 1) socket.emit("type_text", { text: v.slice(0, -1) });
   } else {
-    // Send all characters at once — type_text handles uppercase correctly
     socket.emit("type_text", { text: v });
   }
 });
@@ -981,23 +1050,141 @@ $("btn-nkb").onclick = () => {
   $("btn-nkb").classList.toggle("active", nkbActive);
   nkbActive ? $("kb-input").focus() : $("kb-input").blur();
 };
-// Re-focus NKB input if it loses focus while NKB mode is active
 $("kb-input").addEventListener("blur", () => {
   if (nkbActive) setTimeout(() => {
     if (nkbActive && document.activeElement === document.body) $("kb-input").focus();
   }, 200);
 });
 
-// Settings
+// ===== Audio =====
+function initAudioPlayback() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 22050 });
+  const BUFSIZE = 4096;
+  audioProcessor = audioCtx.createScriptProcessor(BUFSIZE, 1, 1);
+  audioProcessor.onaudioprocess = (ev) => {
+    const output = ev.outputBuffer.getChannelData(0);
+    if (audioQueue.length > 0) {
+      const chunk = audioQueue.shift();
+      const len = Math.min(chunk.length, output.length);
+      for (let i = 0; i < len; i++) output[i] = chunk[i];
+      for (let i = len; i < output.length; i++) output[i] = 0;
+    } else {
+      output.fill(0);
+    }
+  };
+  audioProcessor.connect(audioCtx.destination);
+}
+
+socket.on("audio_data", (d) => {
+  if (!audioActive) return;
+  try {
+    const raw = atob(d.pcm);
+    const int16 = new Int16Array(raw.length / 2);
+    for (let i = 0; i < int16.length; i++) {
+      int16[i] = raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8);
+    }
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+    audioQueue.push(float32);
+    // Prevent buffer bloat
+    while (audioQueue.length > 10) audioQueue.shift();
+  } catch {}
+});
+
+socket.on("audio_status", (d) => {
+  audioActive = d.active;
+  $("btn-audio").classList.toggle("audio-active", d.active);
+  if (d.error) showToast("Audio: " + d.error);
+  else showToast(d.active ? "Audio streaming ON" : "Audio streaming OFF");
+});
+
+$("btn-audio").onclick = () => {
+  if (audioActive) {
+    socket.emit("audio_stop");
+    if (audioCtx) { audioProcessor.disconnect(); audioCtx.close(); audioCtx = null; audioProcessor = null; }
+    audioQueue = [];
+  } else {
+    initAudioPlayback();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    const deviceSel = $("sel-audio-device");
+    const deviceIdx = deviceSel.value ? parseInt(deviceSel.value) : null;
+    socket.emit("audio_start", deviceIdx !== null ? { device: deviceIdx } : {});
+  }
+};
+
+// Load audio devices when settings open
+function loadAudioDevices() {
+  fetch("/api/audio_devices").then(r => r.json()).then(data => {
+    const sel = $("sel-audio-device");
+    sel.innerHTML = "";
+    if (!data.available) {
+      sel.innerHTML = '<option value="">Not available (install sounddevice)</option>';
+      return;
+    }
+    $("audio-device-row").style.display = "block";
+    sel.innerHTML = '<option value="">Default</option>';
+    data.devices.forEach(d => {
+      const opt = document.createElement("option");
+      opt.value = d.index;
+      opt.textContent = d.name + " (" + d.channels + "ch, " + d.sample_rate + "Hz)";
+      sel.appendChild(opt);
+    });
+  }).catch(() => {});
+}
+
+// ===== Latency =====
+setInterval(() => {
+  if (!isConnected) return;
+  socket.emit("ping_check", { t: Date.now() });
+}, 3000);
+socket.on("pong_check", (d) => {
+  latencyMs = Date.now() - d.t;
+  $("latency-display").textContent = latencyMs + "ms";
+  $("latency-display").style.color = latencyMs < 50 ? "var(--green)" : latencyMs < 150 ? "var(--orange)" : "var(--red)";
+});
+
+// ===== Screenshot =====
+$("btn-screenshot").onclick = () => {
+  const link = document.createElement("a");
+  link.download = "screenshot_" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
+  link.href = canvas.toDataURL("image/png");
+  link.click();
+  showToast("Screenshot saved");
+};
+
+// ===== Fullscreen =====
+$("btn-fullscreen").onclick = () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    document.documentElement.requestFullscreen().catch(() => showToast("Fullscreen not supported"));
+  }
+};
+document.addEventListener("fullscreenchange", () => {
+  $("btn-fullscreen").classList.toggle("active", !!document.fullscreenElement);
+  setTimeout(() => { recalcFit(); applyZoom(); }, 100);
+});
+
+// ===== Settings =====
 $("sl-fps").oninput = () => $("val-fps").textContent = $("sl-fps").value;
 $("sl-q").oninput = () => $("val-q").textContent = $("sl-q").value;
 $("sl-s").oninput = () => $("val-s").textContent = ($("sl-s").value/100).toFixed(2);
-$("btn-settings").onclick = () => $("settings-overlay").classList.add("open");
+$("btn-settings").onclick = () => { $("settings-overlay").classList.add("open"); loadAudioDevices(); };
 $("s-cancel").onclick = () => $("settings-overlay").classList.remove("open");
 $("settings-overlay").onclick = (e) => { if (e.target === $("settings-overlay")) $("settings-overlay").classList.remove("open"); };
 $("s-apply").onclick = () => {
-  socket.emit("update_settings", { fps:+$("sl-fps").value, quality:+$("sl-q").value, scale:+$("sl-s").value/100 });
+  const cfg = {
+    fps: +$("sl-fps").value,
+    quality: +$("sl-q").value,
+    scale: +$("sl-s").value / 100,
+    format: $("sel-fmt").value,
+  };
+  socket.emit("update_settings", cfg);
+  // Save to localStorage
+  saveSettings({ fps: cfg.fps, quality: cfg.quality, scale: +$("sl-s").value, format: cfg.format });
   $("settings-overlay").classList.remove("open");
+  showToast("Settings applied & saved");
 };
 
 canvas.focus();

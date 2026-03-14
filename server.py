@@ -31,6 +31,12 @@ from flask_socketio import SocketIO
 from PIL import Image
 from werkzeug.utils import secure_filename
 
+try:
+    import sounddevice as sd
+    HAS_AUDIO = True
+except ImportError:
+    HAS_AUDIO = False
+
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -62,9 +68,19 @@ logical_width, logical_height = pyautogui.size()
 
 settings = {
     "fps": 15,
-    "quality": 50,
-    "scale": 0.5,
+    "quality": 70,
+    "scale": 0.75,
+    "format": "webp",
 }
+
+# Audio streaming state
+audio_active = False
+audio_thread = None
+audio_lock = threading.Lock()
+AUDIO_SAMPLE_RATE = 22050
+AUDIO_CHANNELS = 1
+AUDIO_CHUNK = 2048
+audio_device_index = None
 
 KEY_MAP = {
     "Enter": "return",
@@ -330,12 +346,22 @@ def capture_and_stream():
                 new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
                 pil_img = pil_img.resize(new_size, Image.LANCZOS)
                 buf = BytesIO()
-                pil_img.save(buf, format="JPEG", quality=settings["quality"])
+                fmt = settings.get("format", "webp")
+                if fmt == "png":
+                    pil_img.save(buf, format="PNG", optimize=False)
+                    mime = "image/png"
+                elif fmt == "webp":
+                    pil_img.save(buf, format="WEBP", quality=settings["quality"], method=0)
+                    mime = "image/webp"
+                else:
+                    pil_img.save(buf, format="JPEG", quality=settings["quality"])
+                    mime = "image/jpeg"
                 frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
                 socketio.emit("frame", {
                     "img": frame_b64,
                     "w": logical_width,
                     "h": logical_height,
+                    "fmt": mime,
                 })
             except Exception:
                 LOGGER.exception("Screen capture error")
@@ -658,12 +684,102 @@ def on_clipboard_set(data):
 @socketio.on("update_settings")
 def on_update_settings(data):
     if "fps" in data:
-        settings["fps"] = max(1, min(30, int(data["fps"])))
+        settings["fps"] = max(1, min(60, int(data["fps"])))
     if "quality" in data:
         settings["quality"] = max(10, min(100, int(data["quality"])))
     if "scale" in data:
-        settings["scale"] = max(0.25, min(1.0, float(data["scale"])))
+        settings["scale"] = max(0.1, min(2.0, float(data["scale"])))
+    if "format" in data and data["format"] in ("jpeg", "webp", "png"):
+        settings["format"] = data["format"]
     LOGGER.info("Settings updated: %s", settings)
+
+
+# ---------------------------------------------------------------------------
+# Socket.IO events — latency
+# ---------------------------------------------------------------------------
+
+@socketio.on("ping_check")
+def on_ping_check(data):
+    socketio.emit("pong_check", data, to=request.sid)
+
+
+# ---------------------------------------------------------------------------
+# Socket.IO events — audio streaming
+# ---------------------------------------------------------------------------
+
+def _audio_stream_worker():
+    """Capture system audio and stream PCM chunks to all connected clients."""
+    global audio_active
+    if not HAS_AUDIO:
+        return
+    try:
+        with sd.RawInputStream(
+            samplerate=AUDIO_SAMPLE_RATE,
+            channels=AUDIO_CHANNELS,
+            dtype="int16",
+            blocksize=AUDIO_CHUNK,
+            device=audio_device_index,
+        ) as stream:
+            LOGGER.info("Audio streaming started (device=%s)", audio_device_index)
+            while audio_active:
+                data, _ = stream.read(AUDIO_CHUNK)
+                raw = bytes(data)
+                encoded = base64.b64encode(raw).decode("ascii")
+                socketio.emit("audio_data", {
+                    "pcm": encoded,
+                    "rate": AUDIO_SAMPLE_RATE,
+                    "channels": AUDIO_CHANNELS,
+                })
+    except Exception:
+        LOGGER.exception("Audio streaming error")
+    finally:
+        audio_active = False
+        LOGGER.info("Audio streaming stopped")
+
+
+@socketio.on("audio_start")
+def on_audio_start(data=None):
+    global audio_active, audio_thread, audio_device_index
+    if not HAS_AUDIO:
+        socketio.emit("audio_status", {"active": False, "error": "sounddevice not installed"}, to=request.sid)
+        return
+    if data and "device" in data:
+        audio_device_index = data["device"]
+    with audio_lock:
+        if audio_active:
+            return
+        audio_active = True
+        audio_thread = threading.Thread(target=_audio_stream_worker, daemon=True)
+        audio_thread.start()
+    socketio.emit("audio_status", {"active": True})
+
+
+@socketio.on("audio_stop")
+def on_audio_stop(_data=None):
+    global audio_active
+    with audio_lock:
+        audio_active = False
+    socketio.emit("audio_status", {"active": False})
+
+
+@app.route("/api/audio_devices")
+def list_audio_devices():
+    if not HAS_AUDIO:
+        return jsonify({"available": False, "devices": [], "error": "sounddevice not installed"})
+    try:
+        devices = sd.query_devices()
+        input_devices = []
+        for i, d in enumerate(devices):
+            if d["max_input_channels"] > 0:
+                input_devices.append({
+                    "index": i,
+                    "name": d["name"],
+                    "channels": d["max_input_channels"],
+                    "sample_rate": int(d["default_samplerate"]),
+                })
+        return jsonify({"available": True, "devices": input_devices})
+    except Exception as e:
+        return jsonify({"available": False, "devices": [], "error": str(e)})
 
 
 # ---------------------------------------------------------------------------

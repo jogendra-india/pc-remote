@@ -6,5 +6,8 @@ mss>=9.0
 pyautogui>=0.9
 Pillow>=10.0
 
+# Audio streaming (optional — feature degrades gracefully if missing)
+sounddevice>=0.4
+
 # macOS only — Quartz is auto-installed with pyobjc; not needed on Windows/Linux
 # pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"

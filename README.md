@@ -67,7 +67,7 @@ sudo apt install xclip scrot python3-tk python3-dev
 ## Quick Start
 
 ```bash
-cd macbook-remote
+cd pc-remote
 
 # Create a virtual environment
 python3 -m venv .venv

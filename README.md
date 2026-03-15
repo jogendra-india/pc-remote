@@ -346,7 +346,7 @@ pm2 startup
 Edit `create_tunnel.py` and set your server URL:
 
 ```python
-SERVER = "wss://your-domain.com/tunnel/register?id=plant1"
+SERVER = "wss://your-domain.com/tunnel/register?id=xyz"
 ```
 
 Then start all host-side services:
@@ -362,12 +362,12 @@ python create_tunnel.py
 You should see:
 
 ```
-Tunnel connected to wss://your-domain.com/tunnel/register?id=plant1
+Tunnel connected to wss://your-domain.com/tunnel/register?id=xyz
 ```
 
 ### Step 5: Access from browser
 
-Open `https://your-domain.com/tunnel/plant1` from any browser, anywhere.
+Open `https://your-domain.com/tunnel/xyz` from any browser, anywhere.
 
 ### Startup order summary
 

@@ -458,6 +458,7 @@ let zoomLevel = 1, baseFitW = 100, baseFitH = 100;
 
 // Sticky modifiers
 const mods = { ctrl: false, alt: false, cmd: false, shift: false };
+const isMacBrowser = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
 // Active panel
 let activePanel = null;
@@ -471,7 +472,9 @@ let audioCtx = null, audioProcessor = null, audioQueue = [];
 let latencyMs = 0;
 
 // ===== Socket =====
-const socket = io({ transports: ["websocket", "polling"] });
+const tunnelMatch = window.location.pathname.match(/^(\/tunnel\/[^\/]+)/);
+const BASE = tunnelMatch ? tunnelMatch[1] : "";
+const socket = io({ path: BASE + "/socket.io/", transports: ["websocket"] });
 
 socket.on("connect", () => {
   isConnected = true;
@@ -525,7 +528,6 @@ frameImg.onload = () => {
 function renderLoop() {
   if (newFrameReady) {
     ctx.drawImage(frameImg, 0, 0);
-    drawCursor();
     newFrameReady = false;
   }
   requestAnimationFrame(renderLoop);
@@ -551,10 +553,14 @@ setInterval(() => {
 // ===== Cursor =====
 function drawCursor() {
   const cx = cursorX * canvas.width, cy = cursorY * canvas.height;
-  ctx.save(); ctx.translate(cx, cy);
-  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,18); ctx.lineTo(5,14); ctx.lineTo(10,14); ctx.closePath();
-  ctx.fillStyle = "rgba(255,255,255,.95)"; ctx.fill();
-  ctx.strokeStyle = "rgba(0,0,0,.9)"; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(88,166,255,0.5)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.7)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -805,7 +811,23 @@ $("tp-sdn").onclick = () => socket.emit("scroll", { dy: -5 });
 });
 
 // ===== Clipboard =====
-socket.on("clipboard_content", (d) => { $("clip-text").value = d.text || ""; });
+socket.on("clipboard_content", async (d) => {
+  $("clip-text").value = d.text || "";
+  if (d.text) { try { await navigator.clipboard.writeText(d.text); } catch {} }
+});
+socket.on("clipboard_changed", async (d) => {
+  if (d.text) { try { await navigator.clipboard.writeText(d.text); } catch {} }
+});
+async function syncClipboardAndPaste() {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) {
+      socket.emit("clipboard_set", { text });
+      await new Promise(r => setTimeout(r, 50));
+    }
+  } catch {}
+  socket.emit("hotkey", { modifiers: ["cmd"], key: "v" });
+}
 $("clip-get").onclick = () => { socket.emit("clipboard_get"); showToast("Fetching PC clipboard..."); };
 $("clip-set").onclick = () => { socket.emit("clipboard_set", { text: $("clip-text").value }); showToast("PC clipboard set"); };
 $("clip-paste").onclick = () => {
@@ -829,7 +851,7 @@ $("clip-read-phone").onclick = async () => {
 let currentFilePath = null;
 
 function loadFiles(path) {
-  const url = path ? "/api/files?path=" + encodeURIComponent(path) : "/api/files";
+  const url = BASE + (path ? "/api/files?path=" + encodeURIComponent(path) : "/api/files");
   fetch(url).then(r => r.json()).then(data => {
     if (data.error) { showToast("Error: " + data.error); return; }
     currentFilePath = data.path;
@@ -847,7 +869,7 @@ function loadFiles(path) {
       } else {
         row.innerHTML = '<span class="file-icon">&#128196;</span><span class="file-name">' + esc(item.name) +
           '</span><span class="file-size">' + item.size + '</span>' +
-          '<a class="file-dl" href="/download?path=' + encodeURIComponent(item.path) + '" target="_blank">&#8681;</a>';
+          '<a class="file-dl" href="' + BASE + '/download?path=' + encodeURIComponent(item.path) + '" target="_blank">&#8681;</a>';
       }
       list.appendChild(row);
     });
@@ -861,7 +883,7 @@ $("file-upload-btn").onclick = () => {
   for (const f of files) {
     const fd = new FormData();
     fd.append("file", f);
-    fetch("/upload", { method: "POST", body: fd })
+    fetch(BASE + "/upload", { method: "POST", body: fd })
       .then(r => r.json())
       .then(() => { done++; if (done === files.length) { showToast(done + " file(s) uploaded"); loadFiles(currentFilePath); } })
       .catch(() => showToast("Upload failed"));
@@ -879,11 +901,17 @@ canvas.addEventListener("mousemove", (e) => {
 });
 canvas.addEventListener("mousedown", (e) => {
   e.preventDefault(); canvas.focus();
+  if (e.detail >= 3) {
+    socket.emit("tripleclick", canvasCoords(e.clientX, e.clientY));
+    return;
+  }
   isDragging = true;
   socket.emit("mousedown", { ...canvasCoords(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
 });
 canvas.addEventListener("mouseup", (e) => {
-  e.preventDefault(); isDragging = false;
+  e.preventDefault();
+  if (e.detail >= 3) return;
+  isDragging = false;
   socket.emit("mouseup", { ...canvasCoords(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
 });
 canvas.addEventListener("click", (e) => e.preventDefault());
@@ -989,9 +1017,9 @@ canvas.addEventListener("touchend", (e) => {
 // ===== Keyboard =====
 function buildModList(e) {
   const allMods = [];
-  if (e.ctrlKey  || mods.ctrl)  allMods.push("ctrl");
-  if (e.altKey   || mods.alt)   allMods.push("alt");
-  if (e.metaKey  || mods.cmd)   allMods.push("cmd");
+  if (e.ctrlKey || mods.ctrl) allMods.push(isMacBrowser ? "ctrl" : "cmd");
+  if (e.altKey || mods.alt) allMods.push("alt");
+  if (e.metaKey || mods.cmd) { if (!allMods.includes("cmd")) allMods.push("cmd"); }
   if (e.shiftKey || mods.shift) allMods.push("shift");
   return allMods;
 }
@@ -1003,11 +1031,23 @@ function handleKeyDown(e) {
   if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
   e.preventDefault();
 
+  // Intercept paste — sync browser clipboard to remote first
+  if ((e.key === 'v' || e.key === 'V') && (e.ctrlKey || e.metaKey)) {
+    syncClipboardAndPaste();
+    const hadSticky = mods.ctrl || mods.alt || mods.cmd || mods.shift;
+    if (hadSticky) releaseMods();
+    return;
+  }
+
   const allMods = buildModList(e);
   const hadSticky = mods.ctrl || mods.alt || mods.cmd || mods.shift;
 
   if (allMods.length > 0) {
     socket.emit("hotkey", { modifiers: allMods, key: e.key });
+    // Auto-sync clipboard after copy/cut
+    if (allMods.includes("cmd") && ['c','C','x','X'].includes(e.key)) {
+      setTimeout(() => socket.emit("clipboard_get"), 250);
+    }
     if (hadSticky) releaseMods();
   } else {
     socket.emit("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
@@ -1149,7 +1189,7 @@ $("btn-audio").onclick = () => {
 
 // Load audio devices when settings open
 function loadAudioDevices() {
-  fetch("/api/audio_devices").then(r => r.json()).then(data => {
+  fetch(BASE + "/api/audio_devices").then(r => r.json()).then(data => {
     const sel = $("sel-audio-device");
     sel.innerHTML = "";
     if (!data.available) {

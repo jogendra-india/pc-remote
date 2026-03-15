@@ -28,7 +28,7 @@ import mss
 import pyautogui
 from flask import Flask, jsonify, render_template, request, send_file
 from flask_socketio import SocketIO
-from PIL import Image
+from PIL import Image, ImageDraw
 from werkzeug.utils import secure_filename
 
 try:
@@ -169,6 +169,29 @@ if IS_MACOS:
                 time.sleep(0.01)
 
         @staticmethod
+        def triple_click(x, y):
+            point = (float(x), float(y))
+            btn = Quartz.kCGMouseButtonLeft
+            MouseController.move(x, y)
+            time.sleep(0.01)
+            for click_count in (1, 2, 3):
+                down = Quartz.CGEventCreateMouseEvent(
+                    None, Quartz.kCGEventLeftMouseDown, point, btn,
+                )
+                Quartz.CGEventSetIntegerValueField(
+                    down, Quartz.kCGMouseEventClickState, click_count,
+                )
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+                up = Quartz.CGEventCreateMouseEvent(
+                    None, Quartz.kCGEventLeftMouseUp, point, btn,
+                )
+                Quartz.CGEventSetIntegerValueField(
+                    up, Quartz.kCGMouseEventClickState, click_count,
+                )
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+                time.sleep(0.01)
+
+        @staticmethod
         def scroll(dy):
             event = Quartz.CGEventCreateScrollWheelEvent(
                 None, Quartz.kCGScrollEventUnitLine, 1, int(dy),
@@ -245,6 +268,16 @@ else:
                 pyautogui.doubleClick(int(x), int(y), _pause=False)
 
         @staticmethod
+        def triple_click(x, y):
+            if IS_WINDOWS:
+                ctypes.windll.user32.SetCursorPos(int(x), int(y))
+                for _ in range(3):
+                    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
+                    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
+            else:
+                pyautogui.click(int(x), int(y), clicks=3, _pause=False)
+
+        @staticmethod
         def scroll(dy):
             pyautogui.scroll(int(dy), _pause=False)
 
@@ -281,6 +314,195 @@ else:
 
 
 mouse = MouseController()
+
+
+# ---------------------------------------------------------------------------
+# Cursor capture — composites real system cursor into screenshots
+# ---------------------------------------------------------------------------
+
+_cursor_cache = {}
+
+def _make_arrow_cursor(scale=2):
+    """Draw a macOS-style arrow cursor at the given DPI scale."""
+    w, h = int(17 * scale), int(25 * scale)
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    s = scale
+    # Outer black border
+    d.polygon([
+        (0, 0), (0, int(20 * s)), (int(4.5 * s), int(15.5 * s)),
+        (int(7.5 * s), int(23 * s)), (int(10 * s), int(21.5 * s)),
+        (int(7 * s), int(14 * s)), (int(12 * s), int(14 * s)),
+    ], fill=(0, 0, 0, 220))
+    # Inner white fill
+    d.polygon([
+        (int(1.2 * s), int(2 * s)), (int(1.2 * s), int(18 * s)),
+        (int(5 * s), int(14.5 * s)), (int(8 * s), int(21.5 * s)),
+        (int(9 * s), int(20.5 * s)), (int(6.5 * s), int(13 * s)),
+        (int(10.5 * s), int(13 * s)),
+    ], fill=(255, 255, 255, 245))
+    return img
+
+
+if IS_MACOS:
+
+    def get_cursor_info(screenshot_width):
+        """Use Quartz (thread-safe) for position, draw a static arrow cursor."""
+        try:
+            event = Quartz.CGEventCreate(None)
+            loc = Quartz.CGEventGetLocation(event)
+            dpi = screenshot_width / logical_width
+            if "arrow" not in _cursor_cache:
+                _cursor_cache["arrow"] = _make_arrow_cursor(scale=dpi)
+            cursor_img = _cursor_cache["arrow"]
+            return cursor_img, int(loc.x * dpi), int(loc.y * dpi)
+        except Exception:
+            return None
+
+elif IS_WINDOWS:
+
+    class _POINT_CI(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class _CURSORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_uint), ("flags", ctypes.c_uint),
+            ("hCursor", ctypes.c_void_p), ("ptScreenPos", _POINT_CI),
+        ]
+
+    class _ICONINFO(ctypes.Structure):
+        _fields_ = [
+            ("fIcon", ctypes.c_int),
+            ("xHotspot", ctypes.c_uint), ("yHotspot", ctypes.c_uint),
+            ("hbmMask", ctypes.c_void_p), ("hbmColor", ctypes.c_void_p),
+        ]
+
+    class _BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", ctypes.c_uint),
+            ("biWidth", ctypes.c_int), ("biHeight", ctypes.c_int),
+            ("biPlanes", ctypes.c_ushort), ("biBitCount", ctypes.c_ushort),
+            ("biCompression", ctypes.c_uint), ("biSizeImage", ctypes.c_uint),
+            ("biXPelsPerMeter", ctypes.c_int), ("biYPelsPerMeter", ctypes.c_int),
+            ("biClrUsed", ctypes.c_uint), ("biClrImportant", ctypes.c_uint),
+        ]
+
+    _cur_u32 = ctypes.windll.user32
+    _cur_g32 = ctypes.windll.gdi32
+
+    def _render_win_cursor(h_cursor, cw, ch):
+        hdc_s = _cur_u32.GetDC(0)
+        hdc_m = _cur_g32.CreateCompatibleDC(hdc_s)
+        bmi = _BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.biWidth, bmi.biHeight = cw, -ch
+        bmi.biPlanes, bmi.biBitCount = 1, 32
+        bits = ctypes.c_void_p()
+        hbm = _cur_g32.CreateDIBSection(hdc_m, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+        if not hbm:
+            _cur_g32.DeleteDC(hdc_m)
+            _cur_u32.ReleaseDC(0, hdc_s)
+            return None
+        old = _cur_g32.SelectObject(hdc_m, hbm)
+        buf_sz = cw * ch * 4
+        ctypes.memset(bits, 0, buf_sz)
+        _cur_u32.DrawIconEx(hdc_m, 0, 0, h_cursor, cw, ch, 0, None, 3)
+        raw = (ctypes.c_ubyte * buf_sz)()
+        ctypes.memmove(raw, bits, buf_sz)
+        _cur_g32.SelectObject(hdc_m, old)
+        _cur_g32.DeleteObject(hbm)
+        _cur_g32.DeleteDC(hdc_m)
+        _cur_u32.ReleaseDC(0, hdc_s)
+        return Image.frombuffer("RGBA", (cw, ch), bytes(raw), "raw", "BGRA", 0, 1)
+
+    def get_cursor_info(screenshot_width):
+        try:
+            ci = _CURSORINFO()
+            ci.cbSize = ctypes.sizeof(_CURSORINFO)
+            if not _cur_u32.GetCursorInfo(ctypes.byref(ci)):
+                return None
+            if not (ci.flags & 1):
+                return None
+            ck = ci.hCursor
+            if ck not in _cursor_cache:
+                ii = _ICONINFO()
+                if not _cur_u32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
+                    return None
+                cw = _cur_u32.GetSystemMetrics(13) or 32
+                ch = _cur_u32.GetSystemMetrics(14) or 32
+                img = _render_win_cursor(ci.hCursor, cw, ch)
+                if ii.hbmMask:
+                    _cur_g32.DeleteObject(ii.hbmMask)
+                if ii.hbmColor:
+                    _cur_g32.DeleteObject(ii.hbmColor)
+                if img is None:
+                    return None
+                _cursor_cache[ck] = (img, ii.xHotspot, ii.yHotspot)
+            cursor_img, hx, hy = _cursor_cache[ck]
+            dpi = screenshot_width / logical_width
+            return cursor_img, int(ci.ptScreenPos.x * dpi - hx), int(ci.ptScreenPos.y * dpi - hy)
+        except Exception:
+            return None
+
+else:  # Linux
+
+    _x11_display = None
+    _xfixes_lib = None
+
+    try:
+        _x11_lib = ctypes.cdll.LoadLibrary("libX11.so.6")
+        _xfixes_lib = ctypes.cdll.LoadLibrary("libXfixes.so.3")
+
+        class _XFixesCursorImage(ctypes.Structure):
+            _fields_ = [
+                ("x", ctypes.c_short), ("y", ctypes.c_short),
+                ("width", ctypes.c_ushort), ("height", ctypes.c_ushort),
+                ("xhot", ctypes.c_ushort), ("yhot", ctypes.c_ushort),
+                ("cursor_serial", ctypes.c_ulong),
+                ("pixels", ctypes.POINTER(ctypes.c_ulong)),
+                ("atom", ctypes.c_ulong), ("name", ctypes.c_char_p),
+            ]
+
+        _x11_lib.XOpenDisplay.restype = ctypes.c_void_p
+        _x11_lib.XFree.argtypes = [ctypes.c_void_p]
+        _xfixes_lib.XFixesGetCursorImage.restype = ctypes.POINTER(_XFixesCursorImage)
+        _x11_display = _x11_lib.XOpenDisplay(None)
+    except OSError:
+        pass
+
+    def get_cursor_info(screenshot_width):
+        try:
+            if _x11_display and _xfixes_lib:
+                cp = _xfixes_lib.XFixesGetCursorImage(_x11_display)
+                if cp:
+                    ci = cp.contents
+                    w, h = ci.width, ci.height
+                    serial = ci.cursor_serial
+                    if serial not in _cursor_cache:
+                        rgba = bytearray(w * h * 4)
+                        for i in range(w * h):
+                            p = ci.pixels[i] & 0xFFFFFFFF
+                            rgba[i * 4] = (p >> 16) & 0xFF
+                            rgba[i * 4 + 1] = (p >> 8) & 0xFF
+                            rgba[i * 4 + 2] = p & 0xFF
+                            rgba[i * 4 + 3] = (p >> 24) & 0xFF
+                        _cursor_cache[serial] = (
+                            Image.frombytes("RGBA", (w, h), bytes(rgba)),
+                            ci.xhot, ci.yhot,
+                        )
+                    cursor_img, hx, hy = _cursor_cache[serial]
+                    px, py = ci.x - hx, ci.y - hy
+                    _x11_lib.XFree(cp)
+                    return cursor_img, px, py
+            pos = pyautogui.position()
+            dpi = screenshot_width / logical_width
+            if "fb" not in _cursor_cache:
+                _cursor_cache["fb"] = (_make_arrow_cursor(scale=dpi), 0, 0)
+            cursor_img, hx, hy = _cursor_cache["fb"]
+            dpi = screenshot_width / logical_width
+            return cursor_img, int(pos[0] * dpi - hx), int(pos[1] * dpi - hy)
+        except Exception:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +566,32 @@ def set_clipboard(text):
 
 
 # ---------------------------------------------------------------------------
+# Clipboard auto-sync — polls remote clipboard and pushes changes to browser
+# ---------------------------------------------------------------------------
+
+_last_clipboard_content = ""
+
+
+def clipboard_sync_worker():
+    global _last_clipboard_content
+    while True:
+        try:
+            with clients_lock:
+                has_clients = bool(connected_clients)
+            if not has_clients:
+                time.sleep(5)
+                continue
+            current = get_clipboard() or ""
+            if current != _last_clipboard_content:
+                _last_clipboard_content = current
+                if current:
+                    socketio.emit("clipboard_changed", {"text": current})
+        except Exception:
+            pass
+        time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -367,20 +615,73 @@ def human_size(num_bytes):
 
 
 def capture_and_stream():
+    prev_sample = None
+    prev_cur_pos = None
+    last_sent = 0.0
+    MIN_SEND_INTERVAL = 0.2  # force at least 5 fps even when idle
+
     with mss.mss() as sct:
         monitor = sct.monitors[1]
         while True:
+            frame_start = time.monotonic()
+
             with clients_lock:
                 has_clients = bool(connected_clients)
             if not has_clients:
                 time.sleep(0.5)
                 continue
+
             try:
                 img = sct.grab(monitor)
-                pil_img = Image.frombytes("RGB", img.size, img.rgb)
+                raw = img.rgb
+                scr_w = img.size[0]
+
+                # Get cursor position early for change detection
+                cursor_data = None
+                cur_pos = None
+                try:
+                    cursor_data = get_cursor_info(scr_w)
+                    if cursor_data:
+                        cur_pos = (cursor_data[1], cursor_data[2])
+                except Exception:
+                    pass
+
+                # Skip unchanged frames only when screen AND cursor are static
+                buf_len = len(raw)
+                chunk = 1024
+                sample = (
+                    raw[:chunk]
+                    + raw[buf_len // 3 : buf_len // 3 + chunk]
+                    + raw[2 * buf_len // 3 : 2 * buf_len // 3 + chunk]
+                    + raw[-chunk:]
+                )
+                time_since_last = frame_start - last_sent
+                if (
+                    sample == prev_sample
+                    and cur_pos == prev_cur_pos
+                    and time_since_last < MIN_SEND_INTERVAL
+                ):
+                    elapsed = time.monotonic() - frame_start
+                    time.sleep(max(0, (1.0 / settings["fps"]) - elapsed))
+                    continue
+                prev_sample = sample
+                prev_cur_pos = cur_pos
+
+                pil_img = Image.frombytes("RGB", img.size, raw)
+
+                # Composite cursor onto the screenshot
+                if cursor_data:
+                    try:
+                        cur_img, px, py = cursor_data
+                        pil_img.paste(cur_img, (px, py), cur_img)
+                    except Exception:
+                        pass
+
                 scale = settings["scale"]
-                new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
-                pil_img = pil_img.resize(new_size, Image.LANCZOS)
+                if abs(scale - 1.0) > 0.01:
+                    new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
+                    pil_img = pil_img.resize(new_size, Image.BILINEAR)
+
                 buf = BytesIO()
                 fmt = settings.get("format", "webp")
                 if fmt == "png":
@@ -390,7 +691,7 @@ def capture_and_stream():
                     pil_img.save(buf, format="WEBP", quality=settings["quality"], method=0)
                     mime = "image/webp"
                 else:
-                    pil_img.save(buf, format="JPEG", quality=settings["quality"])
+                    pil_img.save(buf, format="JPEG", quality=settings["quality"], optimize=False)
                     mime = "image/jpeg"
                 frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
                 socketio.emit("frame", {
@@ -399,9 +700,12 @@ def capture_and_stream():
                     "h": logical_height,
                     "fmt": mime,
                 })
+                last_sent = time.monotonic()
             except Exception:
                 LOGGER.exception("Screen capture error")
-            time.sleep(1.0 / settings["fps"])
+
+            elapsed = time.monotonic() - frame_start
+            time.sleep(max(0, (1.0 / settings["fps"]) - elapsed))
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +842,14 @@ def on_dblclick(data):
         mouse.double_click(data["x"] * logical_width, data["y"] * logical_height)
     except Exception:
         LOGGER.exception("mouse.double_click failed")
+
+
+@socketio.on("tripleclick")
+def on_tripleclick(data):
+    try:
+        mouse.triple_click(data["x"] * logical_width, data["y"] * logical_height)
+    except Exception:
+        LOGGER.exception("mouse.triple_click failed")
 
 
 @socketio.on("mousedown")
@@ -708,8 +1020,10 @@ def on_clipboard_get(_data=None):
 
 @socketio.on("clipboard_set")
 def on_clipboard_set(data):
+    global _last_clipboard_content
     text = data.get("text", "")
     set_clipboard(text)
+    _last_clipboard_content = text
     socketio.emit("clipboard_content", {"text": text}, to=request.sid)
 
 
@@ -924,6 +1238,9 @@ if __name__ == "__main__":
 
     stream_thread = threading.Thread(target=capture_and_stream, daemon=True)
     stream_thread.start()
+
+    clipboard_thread = threading.Thread(target=clipboard_sync_worker, daemon=True)
+    clipboard_thread.start()
 
     local_ip = get_local_ip()
     port = 5050

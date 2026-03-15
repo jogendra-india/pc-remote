@@ -104,6 +104,129 @@ The server auto-detects the platform and prints:
 
 Open the **Network** URL on your phone or another device on the same network.
 
+## Tunnel Mode (GCP + Public HTTPS)
+
+Use tunnel mode when you want to access the remote desktop over the internet (not only LAN).
+
+### Components
+
+- `server.py` runs on the host machine (Mac/Windows/Linux) on port `5050`
+- `create_tunnel.py` runs on the same host machine and creates an outbound secure tunnel
+- `server.js` runs on GCP (or any public VM) and relays HTTP + WebSocket traffic
+- Browser accesses `https://<your-domain>/tunnel/<client-id>`
+
+### Run `server.js` on GCP
+
+1. Install Node.js 18+ and create a folder (for example `/opt/tunnel`)
+2. Put `server.js` in that folder
+3. Install dependency:
+
+```bash
+cd /opt/tunnel
+npm init -y
+npm install ws
+```
+
+4. Start the tunnel relay:
+
+```bash
+node server.js
+```
+
+Expected startup logs:
+
+```text
+Tunnel server running on port 9000
+Rate limits: 120 HTTP/min, 10 concurrent WS per IP
+```
+
+5. (Recommended) run as a service (`systemd`/`pm2`) behind Nginx with TLS:
+   - Nginx terminates HTTPS/WSS and proxies to `localhost:9000`
+   - Public endpoint should be `https://<your-domain>/tunnel/<client-id>`
+
+### Run host-side tunnel client
+
+On the host machine (same place where `server.py` is running):
+
+```bash
+python create_tunnel.py
+```
+
+The registration URL in `create_tunnel.py` must match your server:
+
+```python
+SERVER = "wss://<your-domain>/tunnel/register?id=<client-id>"
+```
+
+### End-to-end startup order
+
+1. Start `server.js` on GCP
+2. Start `server.py` on host machine
+3. Start `create_tunnel.py` on host machine
+4. Open `https://<your-domain>/tunnel/<client-id>` from client browser
+
+## Architecture Diagrams
+
+### High-Level Component Diagram
+
+```mermaid
+flowchart LR
+    B[Client Browser] -->|HTTPS + WSS| N[Nginx TLS Proxy]
+    N -->|Proxy pass| G[server.js Tunnel Relay]
+    G <-->|Persistent WSS tunnel| T[create_tunnel.py]
+    T -->|HTTP + WS local proxy| S[server.py Flask + Socket.IO]
+    S -->|Capture/Input/Clipboard| H[Host OS APIs]
+```
+
+### Tunnel Registration and Data Path
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant GCP as server.js (GCP)
+    participant Tunnel as create_tunnel.py
+    participant Host as server.py (5050)
+
+    Tunnel->>GCP: WSS /tunnel/register?id=<client-id>
+    Browser->>GCP: GET /tunnel/<client-id>
+    GCP->>Tunnel: http_request (JSON envelope)
+    Tunnel->>Host: Local HTTP request
+    Host-->>Tunnel: HTML/CSS/JS response
+    Tunnel-->>GCP: http_response
+    GCP-->>Browser: Rendered page
+
+    Browser->>GCP: WSS /tunnel/<client-id>/socket.io
+    GCP->>Tunnel: ws_open + ws_frame
+    Tunnel->>Host: Local WS /socket.io
+    Host-->>Tunnel: frame events + input acks
+    Tunnel-->>GCP: ws_frame (latest-frame-first forwarding)
+    GCP-->>Browser: streamed frames + realtime events
+```
+
+### Input, Clipboard, and Streaming Flow
+
+```mermaid
+flowchart TD
+    I[Client input: mouse/keyboard/touch] --> B[Browser JS]
+    B --> G[server.js relay]
+    G --> T[create_tunnel.py]
+    T --> S[server.py Socket.IO handlers]
+    S --> O[OS control APIs]
+
+    O --> S2[Screen capture thread]
+    S2 --> E[Image encode]
+    E --> S
+    S --> T
+    T --> G
+    G --> B
+
+    C1[Host clipboard changes] --> S
+    S --> B
+    B --> C2[Client clipboard]
+    C2 --> B
+    B --> S
+```
+
 ## Interaction Modes
 
 ### Desktop (mouse + keyboard)

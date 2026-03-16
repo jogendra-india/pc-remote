@@ -6,6 +6,11 @@ mss>=9.0
 pyautogui>=0.9
 Pillow>=10.0
 
+# WebRTC — enables H.264/VP8 video codec streaming (recommended)
+aiortc>=1.14
+numpy>=2.0
+av>=14.0
+
 # Audio streaming (optional — feature degrades gracefully if missing)
 sounddevice>=0.4
 

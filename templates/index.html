@@ -65,7 +65,28 @@ html, body {
   min-width:100%; min-height:100%;
   padding-top:12px; padding-bottom:60vh;
 }
-#screen { display:block; cursor:none; flex-shrink:0; }
+#screen-container { position:relative; display:inline-block; flex-shrink:0; }
+#screen-video {
+  display:block; background:#000;
+  width:100%; height:100%;
+}
+#screen-video.hidden { display:none; }
+#screen {
+  display:block; cursor:none; flex-shrink:0;
+}
+#screen.overlay {
+  position:absolute; top:0; left:0;
+  width:100% !important; height:100% !important;
+  background:transparent;
+}
+.view-only #screen, .view-only #trackpad-area { pointer-events:none; cursor:default; }
+.view-only #screen.overlay { pointer-events:none; cursor:default; }
+#viewonly-badge {
+  display:none; position:fixed; bottom:calc(var(--panel-h) + 8px); right:8px;
+  background:var(--orange); color:#000; padding:4px 12px; border-radius:12px;
+  font-size:11px; font-weight:700; z-index:95; pointer-events:none;
+}
+.view-only #viewonly-badge { display:block; }
 
 /* ---- Bottom Panel Container ---- */
 #bottom-panel {
@@ -241,14 +262,21 @@ html, body {
   <button class="tb" id="btn-nkb" title="Native keyboard">NKB</button>
   <button class="tb" id="btn-audio" title="Audio">&#128266;</button>
   <button class="tb" id="btn-screenshot" title="Screenshot">&#128247;</button>
+  <button class="tb" id="btn-viewonly" title="View-only mode">&#128065;</button>
   <button class="tb" id="btn-fullscreen" title="Fullscreen">&#9974;</button>
   <button class="tb" id="btn-settings" title="Settings">&#9881;</button>
 </div>
 
 <!-- ===== Canvas ===== -->
 <div id="canvas-wrap">
-  <div id="canvas-center"><canvas id="screen" tabindex="0"></canvas></div>
+  <div id="canvas-center">
+    <div id="screen-container">
+      <video id="screen-video" autoplay playsinline muted class="hidden"></video>
+      <canvas id="screen" tabindex="0"></canvas>
+    </div>
+  </div>
 </div>
+<div id="viewonly-badge">VIEW ONLY</div>
 
 <!-- ===== Bottom Panel ===== -->
 <div id="bottom-panel">
@@ -429,8 +457,14 @@ html, body {
 const $ = (s) => document.getElementById(s);
 const canvas = $("screen"), ctx = canvas.getContext("2d");
 const canvasWrap = $("canvas-wrap"), canvasCenter = $("canvas-center");
+const screenContainer = $("screen-container");
+const screenVideo = $("screen-video");
 const bottomPanel = $("bottom-panel");
 const toast = $("toast");
+
+let viewOnly = false;
+let useWebRTC = false;
+let rtcPC = null;
 
 // ===== localStorage helpers =====
 const STORAGE_KEY = "pc_remote_settings";
@@ -508,7 +542,10 @@ socket.on("disconnect", () => {
   $("status-text").textContent = "Disconnected";
   $("connect-banner").classList.remove("hidden");
 });
-socket.on("screen_info", (d) => { screenW = d.width; screenH = d.height; });
+socket.on("screen_info", (d) => {
+  screenW = d.width; screenH = d.height;
+  if (d.webrtc && !rtcPC) startWebRTC();
+});
 
 // ===== Frames with requestAnimationFrame =====
 const frameImg = new Image();
@@ -545,10 +582,89 @@ socket.on("frame", (d) => {
 
 setInterval(() => {
   $("fps-display").textContent = frameCount + " FPS";
-  const kb = Math.round(lastFrameBytes / 1024);
-  $("frame-info").textContent = kb > 0 ? "~" + kb + "KB/f" : "";
+  if (useWebRTC) {
+    $("frame-info").textContent = "WebRTC";
+  } else {
+    const kb = Math.round(lastFrameBytes / 1024);
+    $("frame-info").textContent = kb > 0 ? "~" + kb + "KB/f" : "";
+  }
   frameCount = 0;
 }, 1000);
+
+// ===== WebRTC =====
+function startWebRTC() {
+  if (rtcPC) { rtcPC.close(); rtcPC = null; }
+  rtcPC = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  });
+
+  rtcPC.addTransceiver("video", { direction: "recvonly" });
+
+  rtcPC.ontrack = (ev) => {
+    screenVideo.srcObject = ev.streams[0];
+    screenVideo.classList.remove("hidden");
+    canvas.classList.add("overlay");
+    useWebRTC = true;
+    LOGGER.log("WebRTC track received");
+
+    screenVideo.onloadedmetadata = () => {
+      canvas.width = screenVideo.videoWidth;
+      canvas.height = screenVideo.videoHeight;
+      recalcFit(); applyZoom();
+    };
+
+    if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+      function countFrame() { frameCount++; screenVideo.requestVideoFrameCallback(countFrame); }
+      screenVideo.requestVideoFrameCallback(countFrame);
+    }
+  };
+
+  rtcPC.onicecandidate = (ev) => {
+    if (ev.candidate) {
+      socket.emit("webrtc_ice", {
+        candidate: ev.candidate.candidate,
+        sdpMid: ev.candidate.sdpMid,
+        sdpMLineIndex: ev.candidate.sdpMLineIndex,
+      });
+    }
+  };
+
+  rtcPC.onconnectionstatechange = () => {
+    LOGGER.log("WebRTC state:", rtcPC.connectionState);
+    if (rtcPC.connectionState === "failed" || rtcPC.connectionState === "disconnected") {
+      useWebRTC = false;
+      screenVideo.classList.add("hidden");
+      canvas.classList.remove("overlay");
+      showToast("WebRTC disconnected — falling back to Socket.IO");
+    }
+  };
+
+  rtcPC.createOffer().then(offer => {
+    return rtcPC.setLocalDescription(offer);
+  }).then(() => {
+    socket.emit("webrtc_offer", {
+      sdp: rtcPC.localDescription.sdp,
+      type: rtcPC.localDescription.type,
+    });
+  }).catch(err => {
+    LOGGER.error("WebRTC offer failed:", err);
+    showToast("WebRTC setup failed — using Socket.IO fallback");
+  });
+}
+
+socket.on("webrtc_answer", (d) => {
+  if (!rtcPC) return;
+  rtcPC.setRemoteDescription(new RTCSessionDescription(d)).catch(err => {
+    LOGGER.error("WebRTC answer error:", err);
+  });
+});
+
+socket.on("webrtc_ice_candidate", (d) => {
+  if (!rtcPC) return;
+  rtcPC.addIceCandidate(new RTCIceCandidate(d)).catch(() => {});
+});
+
+const LOGGER = { log: console.log.bind(console), error: console.error.bind(console) };
 
 // ===== Cursor =====
 function drawCursor() {
@@ -574,15 +690,18 @@ function showToast(text) {
 
 // ===== Zoom =====
 function recalcFit() {
-  if (!canvas.width) return;
+  const srcW = useWebRTC ? (screenVideo.videoWidth || canvas.width) : canvas.width;
+  const srcH = useWebRTC ? (screenVideo.videoHeight || canvas.height) : canvas.height;
+  if (!srcW) return;
   const w = canvasWrap.clientWidth, h = canvasWrap.clientHeight;
-  const a = canvas.width / canvas.height;
+  const a = srcW / srcH;
   baseFitW = w; baseFitH = baseFitW / a;
   if (baseFitH > h) { baseFitH = h; baseFitW = baseFitH * a; }
 }
 function applyZoom() {
   const w = Math.round(baseFitW * zoomLevel), h = Math.round(baseFitH * zoomLevel);
-  canvas.style.width = w + "px"; canvas.style.height = h + "px";
+  screenContainer.style.width = w + "px"; screenContainer.style.height = h + "px";
+  if (!useWebRTC) { canvas.style.width = w + "px"; canvas.style.height = h + "px"; }
   canvasCenter.style.minWidth = zoomLevel <= 1.01 ? "100%" : w + "px";
   canvasCenter.style.minHeight = zoomLevel <= 1.01 ? "100%" : h + "px";
   $("zoom-label").textContent = zoomLevel === 1 ? "Fit" : Math.round(zoomLevel * 100) + "%";
@@ -641,6 +760,7 @@ function releaseMods() {
   document.querySelectorAll(".vk-key.mod").forEach(b => b.classList.remove("held"));
 }
 function sendKeyWithMods(key) {
+  if (viewOnly) return;
   const m = getActiveMods();
   if (m.length > 0) {
     socket.emit("hotkey", { modifiers: m, key });
@@ -675,6 +795,7 @@ document.querySelectorAll(".vk-key[data-key]").forEach(btn => {
 document.querySelectorAll(".vk-key[data-hk]").forEach(btn => {
   function fire(e) {
     e.preventDefault(); e.stopPropagation();
+    if (viewOnly) return;
     const parts = btn.dataset.hk.split("+");
     const key = parts.pop();
     socket.emit("hotkey", { modifiers: parts, key });
@@ -712,6 +833,7 @@ function tpMoveCursor(t) {
 
 tpArea.addEventListener("touchstart", (e) => {
   e.preventDefault();
+  if (viewOnly) return;
   const t = e.touches[0];
   tpLast = { x: t.clientX, y: t.clientY };
   tpStart = { x: t.clientX, y: t.clientY };
@@ -732,6 +854,7 @@ tpArea.addEventListener("touchstart", (e) => {
 
 tpArea.addEventListener("touchmove", (e) => {
   e.preventDefault();
+  if (viewOnly) return;
   const t = e.touches[0];
   tpMoveCursor(t);
   tpLast = { x: t.clientX, y: t.clientY };
@@ -744,6 +867,7 @@ tpArea.addEventListener("touchmove", (e) => {
 
 tpArea.addEventListener("touchend", (e) => {
   e.preventDefault();
+  if (viewOnly) return;
   const t = e.changedTouches[0];
   const elapsed = Date.now() - tpStartTime;
   const dist = tpStart ? Math.hypot(t.clientX - tpStart.x, t.clientY - tpStart.y) : 999;
@@ -765,6 +889,7 @@ tpArea.addEventListener("touchend", (e) => {
 // Mouse support on trackpad area
 let tpMouseDown = false, tpMouseLast = null;
 tpArea.addEventListener("mousedown", (e) => {
+  if (viewOnly) return;
   tpMouseDown = true;
   tpMouseLast = { x: e.clientX, y: e.clientY };
   if (tpDragMode && !tpDragging) {
@@ -792,10 +917,11 @@ tpArea.addEventListener("mouseup", () => {
   }
 });
 
-$("tp-left").onclick = () => socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
-$("tp-right").onclick = () => socket.emit("click", { x: cursorX, y: cursorY, btn: "right" });
-$("tp-dbl").onclick = () => socket.emit("dblclick", { x: cursorX, y: cursorY });
+$("tp-left").onclick = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "left" }); };
+$("tp-right").onclick = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "right" }); };
+$("tp-dbl").onclick = () => { if (viewOnly) return; socket.emit("dblclick", { x: cursorX, y: cursorY }); };
 $("tp-drag").onclick = () => {
+  if (viewOnly) return;
   tpDragMode = !tpDragMode;
   $("tp-drag").classList.toggle("active", tpDragMode);
   tpArea.textContent = tpDragMode
@@ -803,8 +929,8 @@ $("tp-drag").onclick = () => {
     : "Drag to move cursor \u00b7 Tap to click";
   showToast(tpDragMode ? "Drag mode ON: touch pad to grab & drag" : "Drag mode OFF");
 };
-$("tp-sup").onclick = () => socket.emit("scroll", { dy: 5 });
-$("tp-sdn").onclick = () => socket.emit("scroll", { dy: -5 });
+$("tp-sup").onclick = () => { if (viewOnly) return; socket.emit("scroll", { dy: 5 }); };
+$("tp-sdn").onclick = () => { if (viewOnly) return; socket.emit("scroll", { dy: -5 }); };
 
 ["tp-left","tp-right","tp-dbl","tp-drag","tp-sup","tp-sdn"].forEach(id => {
   $(id).addEventListener("touchstart", (e) => { e.preventDefault(); $(id).click(); }, { passive: false });
@@ -894,33 +1020,50 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s; re
 
 // ===== Desktop mouse events =====
 let isDragging = false;
+
+function canvasCoordsFromVideo(cx, cy) {
+  const el = useWebRTC ? screenContainer : canvas;
+  const r = el.getBoundingClientRect();
+  return { x: Math.max(0, Math.min(1, (cx - r.left) / r.width)), y: Math.max(0, Math.min(1, (cy - r.top) / r.height)) };
+}
+
 canvas.addEventListener("mousemove", (e) => {
-  const c = canvasCoords(e.clientX, e.clientY);
+  if (viewOnly) return;
+  const c = useWebRTC ? canvasCoordsFromVideo(e.clientX, e.clientY) : canvasCoords(e.clientX, e.clientY);
   cursorX = c.x; cursorY = c.y;
   isDragging ? socket.emit("drag", c) : emitMove(c);
 });
 canvas.addEventListener("mousedown", (e) => {
   e.preventDefault(); canvas.focus();
+  if (viewOnly) return;
+  const coordFn = useWebRTC ? canvasCoordsFromVideo : canvasCoords;
   if (e.detail >= 3) {
-    socket.emit("tripleclick", canvasCoords(e.clientX, e.clientY));
+    socket.emit("tripleclick", coordFn(e.clientX, e.clientY));
     return;
   }
   isDragging = true;
-  socket.emit("mousedown", { ...canvasCoords(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
+  socket.emit("mousedown", { ...coordFn(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
 });
 canvas.addEventListener("mouseup", (e) => {
   e.preventDefault();
+  if (viewOnly) return;
   if (e.detail >= 3) return;
   isDragging = false;
-  socket.emit("mouseup", { ...canvasCoords(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
+  const coordFn = useWebRTC ? canvasCoordsFromVideo : canvasCoords;
+  socket.emit("mouseup", { ...coordFn(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
 });
 canvas.addEventListener("click", (e) => e.preventDefault());
-canvas.addEventListener("dblclick", (e) => { e.preventDefault(); socket.emit("dblclick", canvasCoords(e.clientX, e.clientY)); });
+canvas.addEventListener("dblclick", (e) => {
+  e.preventDefault();
+  if (viewOnly) return;
+  const coordFn = useWebRTC ? canvasCoordsFromVideo : canvasCoords;
+  socket.emit("dblclick", coordFn(e.clientX, e.clientY));
+});
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 canvasWrap.addEventListener("wheel", (e) => {
   if (e.ctrlKey || e.metaKey) { e.preventDefault(); setZoom(zoomLevel + (e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP)); }
-  else if (zoomLevel <= 1.01) { e.preventDefault(); socket.emit("scroll", { dy: e.deltaY > 0 ? -3 : 3 }); }
+  else if (zoomLevel <= 1.01 && !viewOnly) { e.preventDefault(); socket.emit("scroll", { dy: e.deltaY > 0 ? -3 : 3 }); }
 }, { passive: false });
 
 // ===== Touch on canvas =====
@@ -935,6 +1078,7 @@ function midpoint(a,b) { return { x:(a.clientX+b.clientX)/2, y:(a.clientY+b.clie
 
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
+  if (viewOnly) return;
   if (e.touches.length === 2) {
     pinchActive = true;
     lastPinchDist = pDist(e.touches[0], e.touches[1]);
@@ -959,6 +1103,7 @@ canvas.addEventListener("touchstart", (e) => {
 
 canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
+  if (viewOnly) return;
   if (e.touches.length === 2 && pinchActive) {
     const d = pDist(e.touches[0], e.touches[1]);
     if (lastPinchDist > 0) setZoom(pinchBaseZoom * d / lastPinchDist);
@@ -997,6 +1142,7 @@ canvas.addEventListener("touchmove", (e) => {
 
 canvas.addEventListener("touchend", (e) => {
   e.preventDefault();
+  if (viewOnly) return;
   if (e.touches.length < 2) { pinchActive = false; lastPinchDist = 0; twoFingerMid = null; }
   if (e.touches.length > 0) return;
   const t = e.changedTouches[0], elapsed = Date.now()-tStartTime;
@@ -1025,7 +1171,7 @@ function buildModList(e) {
 }
 
 function handleKeyDown(e) {
-  if (!isConnected) return;
+  if (!isConnected || viewOnly) return;
   if ($("settings-overlay").classList.contains("open")) return;
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
   if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
@@ -1057,7 +1203,7 @@ canvas.addEventListener("keydown", handleKeyDown);
 
 // NKB keydown
 $("kb-input").addEventListener("keydown", (e) => {
-  if (!isConnected) return;
+  if (!isConnected || viewOnly) return;
   e.stopPropagation();
   if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
   if (e.key === "Unidentified" || e.key === "Process") return;
@@ -1082,6 +1228,7 @@ $("kb-input").addEventListener("keydown", (e) => {
 
 // NKB input
 $("kb-input").addEventListener("input", () => {
+  if (viewOnly) return;
   const v = $("kb-input").value;
   if (!v) return;
   $("kb-input").value = "";
@@ -1222,9 +1369,30 @@ socket.on("pong_check", (d) => {
 $("btn-screenshot").onclick = () => {
   const link = document.createElement("a");
   link.download = "screenshot_" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
-  link.href = canvas.toDataURL("image/png");
+  if (useWebRTC && screenVideo.videoWidth) {
+    const sc = document.createElement("canvas");
+    sc.width = screenVideo.videoWidth; sc.height = screenVideo.videoHeight;
+    sc.getContext("2d").drawImage(screenVideo, 0, 0);
+    link.href = sc.toDataURL("image/png");
+  } else {
+    link.href = canvas.toDataURL("image/png");
+  }
   link.click();
   showToast("Screenshot saved");
+};
+
+// ===== View-Only Mode =====
+$("btn-viewonly").onclick = () => {
+  viewOnly = !viewOnly;
+  $("btn-viewonly").classList.toggle("active", viewOnly);
+  document.body.classList.toggle("view-only", viewOnly);
+  if (viewOnly) {
+    canvas.style.cursor = "default";
+    isDragging = false;
+  } else {
+    canvas.style.cursor = "none";
+  }
+  showToast(viewOnly ? "View-only mode — input disabled" : "Interactive mode");
 };
 
 // ===== Fullscreen =====

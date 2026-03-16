@@ -37,6 +37,16 @@ try:
 except ImportError:
     HAS_AUDIO = False
 
+try:
+    import asyncio
+    import numpy as np
+    from aiortc import RTCPeerConnection, RTCSessionDescription
+    from aiortc.mediastreams import VideoStreamTrack
+    from av import VideoFrame
+    HAS_WEBRTC = True
+except ImportError:
+    HAS_WEBRTC = False
+
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
@@ -614,6 +624,94 @@ def human_size(num_bytes):
     return f"{num_bytes:.1f} TB"
 
 
+# ---------------------------------------------------------------------------
+# WebRTC — ScreenShareTrack + event loop + peer connection management
+# ---------------------------------------------------------------------------
+
+_peer_connections: dict[str, "RTCPeerConnection"] = {}
+_webrtc_loop = None
+_capture_local = None
+
+if HAS_WEBRTC:
+
+    _capture_local = threading.local()
+
+    class ScreenShareTrack(VideoStreamTrack):
+        kind = "video"
+
+        def __init__(self):
+            super().__init__()
+            self._last_capture = 0.0
+
+        def _capture_frame(self):
+            if not hasattr(_capture_local, "sct"):
+                _capture_local.sct = mss.mss()
+            sct = _capture_local.sct
+            monitor = sct.monitors[1]
+            img = sct.grab(monitor)
+            scr_w = img.size[0]
+
+            frame_np = np.frombuffer(img.rgb, dtype=np.uint8).reshape(
+                img.height, img.width, 3,
+            ).copy()
+
+            try:
+                cursor_data = get_cursor_info(scr_w)
+                if cursor_data:
+                    cur_img, px, py = cursor_data
+                    cur_np = np.array(cur_img)
+                    ch, cw = cur_np.shape[:2]
+                    y1 = max(0, py)
+                    y2 = min(img.height, py + ch)
+                    x1 = max(0, px)
+                    x2 = min(img.width, px + cw)
+                    cy1, cx1 = y1 - py, x1 - px
+                    cy2, cx2 = cy1 + (y2 - y1), cx1 + (x2 - x1)
+                    if y2 > y1 and x2 > x1:
+                        alpha = cur_np[cy1:cy2, cx1:cx2, 3:4].astype(np.float32) / 255.0
+                        frame_np[y1:y2, x1:x2] = (
+                            frame_np[y1:y2, x1:x2].astype(np.float32) * (1 - alpha)
+                            + cur_np[cy1:cy2, cx1:cx2, :3].astype(np.float32) * alpha
+                        ).astype(np.uint8)
+            except Exception:
+                pass
+
+            scale = settings.get("scale", 1.0)
+            if abs(scale - 1.0) > 0.01:
+                pil_img = Image.fromarray(frame_np)
+                new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
+                pil_img = pil_img.resize(new_size, Image.BILINEAR)
+                frame_np = np.array(pil_img)
+
+            return frame_np
+
+        async def recv(self):
+            target_fps = min(settings.get("fps", 30), 60)
+            target_interval = 1.0 / target_fps
+            elapsed = time.time() - self._last_capture
+            if elapsed < target_interval:
+                await asyncio.sleep(target_interval - elapsed)
+
+            pts, time_base = await self.next_timestamp()
+            frame_np = await asyncio.to_thread(self._capture_frame)
+            self._last_capture = time.time()
+
+            frame = VideoFrame.from_ndarray(frame_np, format="rgb24")
+            frame.pts = pts
+            frame.time_base = time_base
+            return frame
+
+    def _run_webrtc_loop():
+        global _webrtc_loop
+        _webrtc_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_webrtc_loop)
+        _webrtc_loop.run_forever()
+
+    LOGGER.info("WebRTC support: enabled (aiortc)")
+else:
+    LOGGER.info("WebRTC support: disabled (aiortc not installed, using Socket.IO fallback)")
+
+
 def capture_and_stream():
     prev_sample = None
     prev_cur_pos = None
@@ -799,7 +897,7 @@ def on_connect():
         connected_clients.add(request.sid)
     socketio.emit(
         "screen_info",
-        {"width": logical_width, "height": logical_height},
+        {"width": logical_width, "height": logical_height, "webrtc": HAS_WEBRTC},
         to=request.sid,
     )
     LOGGER.info("Client connected: %s (total: %d)", request.sid, len(connected_clients))
@@ -807,9 +905,14 @@ def on_connect():
 
 @socketio.on("disconnect")
 def on_disconnect():
+    sid = request.sid
     with clients_lock:
-        connected_clients.discard(request.sid)
-    LOGGER.info("Client disconnected: %s (total: %d)", request.sid, len(connected_clients))
+        connected_clients.discard(sid)
+    if HAS_WEBRTC and sid in _peer_connections:
+        pc = _peer_connections.pop(sid)
+        if _webrtc_loop and _webrtc_loop.is_running():
+            asyncio.run_coroutine_threadsafe(pc.close(), _webrtc_loop)
+    LOGGER.info("Client disconnected: %s (total: %d)", sid, len(connected_clients))
 
 
 # ---------------------------------------------------------------------------
@@ -1054,6 +1157,66 @@ def on_ping_check(data):
 
 
 # ---------------------------------------------------------------------------
+# Socket.IO events — WebRTC signaling
+# ---------------------------------------------------------------------------
+
+if HAS_WEBRTC:
+
+    @socketio.on("webrtc_offer")
+    def on_webrtc_offer(data):
+        sid = request.sid
+
+        async def _handle_offer():
+            if sid in _peer_connections:
+                old_pc = _peer_connections.pop(sid)
+                await old_pc.close()
+
+            pc = RTCPeerConnection()
+            _peer_connections[sid] = pc
+
+            @pc.on("connectionstatechange")
+            async def on_state_change():
+                LOGGER.info("WebRTC state [%s]: %s", sid, pc.connectionState)
+                if pc.connectionState in ("failed", "closed"):
+                    if sid in _peer_connections:
+                        _peer_connections.pop(sid)
+
+            pc.addTrack(ScreenShareTrack())
+
+            offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+            await pc.setRemoteDescription(offer)
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+
+            socketio.emit("webrtc_answer", {
+                "sdp": pc.localDescription.sdp,
+                "type": pc.localDescription.type,
+            }, to=sid)
+
+        asyncio.run_coroutine_threadsafe(_handle_offer(), _webrtc_loop)
+
+    @socketio.on("webrtc_ice")
+    def on_webrtc_ice(data):
+        sid = request.sid
+        pc = _peer_connections.get(sid)
+        if not pc:
+            return
+
+        async def _add_ice():
+            from aiortc import RTCIceCandidate
+            try:
+                candidate_str = data.get("candidate", "")
+                if not candidate_str:
+                    return
+                # aiortc handles ICE candidates via addIceCandidate internally
+                # through the SDP exchange; explicit ICE is optional
+            except Exception:
+                LOGGER.exception("ICE candidate error")
+
+        asyncio.run_coroutine_threadsafe(_add_ice(), _webrtc_loop)
+
+
+# ---------------------------------------------------------------------------
 # Socket.IO events — audio streaming
 # ---------------------------------------------------------------------------
 
@@ -1235,6 +1398,11 @@ if __name__ == "__main__":
     if _sleep_cleanup:
         atexit.register(_sleep_cleanup)
         signal.signal(signal.SIGTERM, lambda *_: (_sleep_cleanup(), os._exit(0)))
+
+    if HAS_WEBRTC:
+        webrtc_thread = threading.Thread(target=_run_webrtc_loop, daemon=True)
+        webrtc_thread.start()
+        LOGGER.info("WebRTC event loop started")
 
     stream_thread = threading.Thread(target=capture_and_stream, daemon=True)
     stream_thread.start()

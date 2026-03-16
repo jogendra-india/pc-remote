@@ -81,7 +81,48 @@ settings = {
     "quality": 70,
     "scale": 0.75,
     "format": "webp",
+    "monitor": 1,
 }
+
+
+_active_monitor = {"left": 0, "top": 0, "width": logical_width, "height": logical_height}
+
+
+def _mouse_xy(data):
+    """Convert browser 0-1 ratios to absolute screen coordinates for the active monitor."""
+    m = _active_monitor
+    return m["left"] + data["x"] * m["width"], m["top"] + data["y"] * m["height"]
+
+
+def _sync_active_monitor():
+    """Refresh _active_monitor from the current settings['monitor']."""
+    global _active_monitor
+    with mss.mss() as sct:
+        idx = settings.get("monitor", 1)
+        if idx < 0 or idx >= len(sct.monitors):
+            idx = 1
+        m = sct.monitors[idx]
+        _active_monitor = {"left": m["left"], "top": m["top"], "width": m["width"], "height": m["height"]}
+
+
+_sync_active_monitor()
+
+
+def _get_monitor_list():
+    """Return a list of monitors with index, resolution, and position."""
+    with mss.mss() as sct:
+        monitors = []
+        for i, m in enumerate(sct.monitors):
+            label = "All Screens" if i == 0 else f"Screen {i}"
+            monitors.append({
+                "index": i,
+                "label": label,
+                "width": m["width"],
+                "height": m["height"],
+                "left": m["left"],
+                "top": m["top"],
+            })
+        return monitors
 
 # Audio streaming state
 audio_active = False
@@ -356,16 +397,24 @@ def _make_arrow_cursor(scale=2):
 
 if IS_MACOS:
 
-    def get_cursor_info(screenshot_width):
+    def get_cursor_info(screenshot_width, monitor=None):
         """Use Quartz (thread-safe) for position, draw a static arrow cursor."""
         try:
             event = Quartz.CGEventCreate(None)
             loc = Quartz.CGEventGetLocation(event)
-            dpi = screenshot_width / logical_width
-            if "arrow" not in _cursor_cache:
-                _cursor_cache["arrow"] = _make_arrow_cursor(scale=dpi)
-            cursor_img = _cursor_cache["arrow"]
-            return cursor_img, int(loc.x * dpi), int(loc.y * dpi)
+            if monitor:
+                dpi = screenshot_width / monitor["width"]
+                px = int((loc.x - monitor["left"]) * dpi)
+                py = int((loc.y - monitor["top"]) * dpi)
+            else:
+                dpi = screenshot_width / logical_width
+                px = int(loc.x * dpi)
+                py = int(loc.y * dpi)
+            cache_key = f"arrow_{dpi:.2f}"
+            if cache_key not in _cursor_cache:
+                _cursor_cache[cache_key] = _make_arrow_cursor(scale=dpi)
+            cursor_img = _cursor_cache[cache_key]
+            return cursor_img, px, py
         except Exception:
             return None
 
@@ -425,7 +474,7 @@ elif IS_WINDOWS:
         _cur_u32.ReleaseDC(0, hdc_s)
         return Image.frombuffer("RGBA", (cw, ch), bytes(raw), "raw", "BGRA", 0, 1)
 
-    def get_cursor_info(screenshot_width):
+    def get_cursor_info(screenshot_width, monitor=None):
         try:
             ci = _CURSORINFO()
             ci.cbSize = ctypes.sizeof(_CURSORINFO)
@@ -449,8 +498,15 @@ elif IS_WINDOWS:
                     return None
                 _cursor_cache[ck] = (img, ii.xHotspot, ii.yHotspot)
             cursor_img, hx, hy = _cursor_cache[ck]
-            dpi = screenshot_width / logical_width
-            return cursor_img, int(ci.ptScreenPos.x * dpi - hx), int(ci.ptScreenPos.y * dpi - hy)
+            if monitor:
+                dpi = screenshot_width / monitor["width"]
+                px = int((ci.ptScreenPos.x - monitor["left"]) * dpi - hx)
+                py = int((ci.ptScreenPos.y - monitor["top"]) * dpi - hy)
+            else:
+                dpi = screenshot_width / logical_width
+                px = int(ci.ptScreenPos.x * dpi - hx)
+                py = int(ci.ptScreenPos.y * dpi - hy)
+            return cursor_img, px, py
         except Exception:
             return None
 
@@ -480,7 +536,7 @@ else:  # Linux
     except OSError:
         pass
 
-    def get_cursor_info(screenshot_width):
+    def get_cursor_info(screenshot_width, monitor=None):
         try:
             if _x11_display and _xfixes_lib:
                 cp = _xfixes_lib.XFixesGetCursorImage(_x11_display)
@@ -501,16 +557,27 @@ else:  # Linux
                             ci.xhot, ci.yhot,
                         )
                     cursor_img, hx, hy = _cursor_cache[serial]
-                    px, py = ci.x - hx, ci.y - hy
+                    if monitor:
+                        px = ci.x - monitor["left"] - hx
+                        py = ci.y - monitor["top"] - hy
+                    else:
+                        px, py = ci.x - hx, ci.y - hy
                     _x11_lib.XFree(cp)
                     return cursor_img, px, py
             pos = pyautogui.position()
-            dpi = screenshot_width / logical_width
-            if "fb" not in _cursor_cache:
-                _cursor_cache["fb"] = (_make_arrow_cursor(scale=dpi), 0, 0)
-            cursor_img, hx, hy = _cursor_cache["fb"]
-            dpi = screenshot_width / logical_width
-            return cursor_img, int(pos[0] * dpi - hx), int(pos[1] * dpi - hy)
+            if monitor:
+                dpi = screenshot_width / monitor["width"]
+                px = int((pos[0] - monitor["left"]) * dpi)
+                py = int((pos[1] - monitor["top"]) * dpi)
+            else:
+                dpi = screenshot_width / logical_width
+                px = int(pos[0] * dpi)
+                py = int(pos[1] * dpi)
+            cache_key = f"fb_{dpi:.2f}"
+            if cache_key not in _cursor_cache:
+                _cursor_cache[cache_key] = (_make_arrow_cursor(scale=dpi), 0, 0)
+            cursor_img, hx, hy = _cursor_cache[cache_key]
+            return cursor_img, px - hx, py - hy
         except Exception:
             return None
 
@@ -647,7 +714,10 @@ if HAS_WEBRTC:
             if not hasattr(_capture_local, "sct"):
                 _capture_local.sct = mss.mss()
             sct = _capture_local.sct
-            monitor = sct.monitors[1]
+            mon_idx = settings.get("monitor", 1)
+            if mon_idx < 0 or mon_idx >= len(sct.monitors):
+                mon_idx = 1
+            monitor = sct.monitors[mon_idx]
             img = sct.grab(monitor)
             scr_w = img.size[0]
 
@@ -656,7 +726,7 @@ if HAS_WEBRTC:
             ).copy()
 
             try:
-                cursor_data = get_cursor_info(scr_w)
+                cursor_data = get_cursor_info(scr_w, monitor)
                 if cursor_data:
                     cur_img, px, py = cursor_data
                     cur_np = np.array(cur_img)
@@ -719,7 +789,6 @@ def capture_and_stream():
     MIN_SEND_INTERVAL = 0.2  # force at least 5 fps even when idle
 
     with mss.mss() as sct:
-        monitor = sct.monitors[1]
         while True:
             frame_start = time.monotonic()
 
@@ -730,6 +799,10 @@ def capture_and_stream():
                 continue
 
             try:
+                mon_idx = settings.get("monitor", 1)
+                if mon_idx < 0 or mon_idx >= len(sct.monitors):
+                    mon_idx = 1
+                monitor = sct.monitors[mon_idx]
                 img = sct.grab(monitor)
                 raw = img.rgb
                 scr_w = img.size[0]
@@ -738,7 +811,7 @@ def capture_and_stream():
                 cursor_data = None
                 cur_pos = None
                 try:
-                    cursor_data = get_cursor_info(scr_w)
+                    cursor_data = get_cursor_info(scr_w, monitor)
                     if cursor_data:
                         cur_pos = (cursor_data[1], cursor_data[2])
                 except Exception:
@@ -895,9 +968,16 @@ def list_files():
 def on_connect():
     with clients_lock:
         connected_clients.add(request.sid)
+    monitors = _get_monitor_list()
     socketio.emit(
         "screen_info",
-        {"width": logical_width, "height": logical_height, "webrtc": HAS_WEBRTC},
+        {
+            "width": logical_width,
+            "height": logical_height,
+            "webrtc": HAS_WEBRTC,
+            "monitors": monitors,
+            "active_monitor": settings["monitor"],
+        },
         to=request.sid,
     )
     LOGGER.info("Client connected: %s (total: %d)", request.sid, len(connected_clients))
@@ -922,7 +1002,8 @@ def on_disconnect():
 @socketio.on("move")
 def on_move(data):
     try:
-        mouse.move(data["x"] * logical_width, data["y"] * logical_height)
+        x, y = _mouse_xy(data)
+        mouse.move(x, y)
     except Exception:
         LOGGER.exception("mouse.move failed")
 
@@ -930,11 +1011,8 @@ def on_move(data):
 @socketio.on("click")
 def on_click(data):
     try:
-        mouse.click(
-            data["x"] * logical_width,
-            data["y"] * logical_height,
-            button=data.get("btn", "left"),
-        )
+        x, y = _mouse_xy(data)
+        mouse.click(x, y, button=data.get("btn", "left"))
     except Exception:
         LOGGER.exception("mouse.click failed")
 
@@ -942,7 +1020,8 @@ def on_click(data):
 @socketio.on("dblclick")
 def on_dblclick(data):
     try:
-        mouse.double_click(data["x"] * logical_width, data["y"] * logical_height)
+        x, y = _mouse_xy(data)
+        mouse.double_click(x, y)
     except Exception:
         LOGGER.exception("mouse.double_click failed")
 
@@ -950,7 +1029,8 @@ def on_dblclick(data):
 @socketio.on("tripleclick")
 def on_tripleclick(data):
     try:
-        mouse.triple_click(data["x"] * logical_width, data["y"] * logical_height)
+        x, y = _mouse_xy(data)
+        mouse.triple_click(x, y)
     except Exception:
         LOGGER.exception("mouse.triple_click failed")
 
@@ -958,11 +1038,8 @@ def on_tripleclick(data):
 @socketio.on("mousedown")
 def on_mousedown(data):
     try:
-        mouse.mouse_down(
-            data["x"] * logical_width,
-            data["y"] * logical_height,
-            button=data.get("btn", "left"),
-        )
+        x, y = _mouse_xy(data)
+        mouse.mouse_down(x, y, button=data.get("btn", "left"))
     except Exception:
         LOGGER.exception("mouse.mouse_down failed")
 
@@ -970,11 +1047,8 @@ def on_mousedown(data):
 @socketio.on("mouseup")
 def on_mouseup(data):
     try:
-        mouse.mouse_up(
-            data["x"] * logical_width,
-            data["y"] * logical_height,
-            button=data.get("btn", "left"),
-        )
+        x, y = _mouse_xy(data)
+        mouse.mouse_up(x, y, button=data.get("btn", "left"))
     except Exception:
         LOGGER.exception("mouse.mouse_up failed")
 
@@ -982,7 +1056,8 @@ def on_mouseup(data):
 @socketio.on("drag")
 def on_drag(data):
     try:
-        mouse.drag(data["x"] * logical_width, data["y"] * logical_height)
+        x, y = _mouse_xy(data)
+        mouse.drag(x, y)
     except Exception:
         LOGGER.exception("mouse.drag failed")
 
@@ -1145,6 +1220,25 @@ def on_update_settings(data):
     if "format" in data and data["format"] in ("jpeg", "webp", "png"):
         settings["format"] = data["format"]
     LOGGER.info("Settings updated: %s", settings)
+
+
+@socketio.on("select_monitor")
+def on_select_monitor(data):
+    idx = int(data.get("index", 1))
+    with mss.mss() as sct:
+        if idx < 0 or idx >= len(sct.monitors):
+            idx = 1
+    settings["monitor"] = idx
+    _sync_active_monitor()
+    mon = _get_monitor_list()
+    selected = next((m for m in mon if m["index"] == idx), mon[1] if len(mon) > 1 else mon[0])
+    LOGGER.info("Monitor switched to %d (%s, %dx%d)", idx, selected["label"], selected["width"], selected["height"])
+    socketio.emit("monitor_changed", {
+        "index": idx,
+        "width": selected["width"],
+        "height": selected["height"],
+        "label": selected["label"],
+    })
 
 
 # ---------------------------------------------------------------------------

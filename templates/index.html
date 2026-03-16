@@ -254,6 +254,7 @@ html, body {
     <button class="tb" id="btn-zi" title="Zoom in">+</button>
     <button class="tb" id="btn-zf" title="Fit">Fit</button>
   </div>
+  <select class="tb" id="monitor-sel" title="Select monitor" style="padding:3px 4px;font-size:11px;background:var(--surface);color:var(--text-dim);max-width:120px;"></select>
   <button class="tb" id="btn-mode" title="Direct / Trackpad">Direct</button>
   <button class="tb" id="btn-p-tp" title="Trackpad panel">Pad</button>
   <button class="tb" id="btn-p-kb" title="Virtual keyboard">Keys</button>
@@ -544,8 +545,39 @@ socket.on("disconnect", () => {
 });
 socket.on("screen_info", (d) => {
   screenW = d.width; screenH = d.height;
+
+  // Populate monitor selector
+  if (d.monitors && d.monitors.length > 0) {
+    const sel = $("monitor-sel");
+    sel.innerHTML = "";
+    d.monitors.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m.index;
+      opt.textContent = m.label + " (" + m.width + "x" + m.height + ")";
+      sel.appendChild(opt);
+    });
+    if (d.active_monitor !== undefined) sel.value = d.active_monitor;
+    sel.style.display = d.monitors.length > 2 ? "" : "none";
+  }
+
   if (d.webrtc && !rtcPC) startWebRTC();
 });
+
+socket.on("monitor_changed", (d) => {
+  showToast("Switched to " + d.label + " (" + d.width + "x" + d.height + ")");
+});
+
+$("monitor-sel").onchange = () => {
+  const idx = parseInt($("monitor-sel").value);
+  socket.emit("select_monitor", { index: idx });
+  // If using WebRTC, renegotiate to get the new resolution
+  if (useWebRTC && rtcPC) {
+    rtcPC.close();
+    rtcPC = null;
+    useWebRTC = false;
+    setTimeout(() => startWebRTC(), 500);
+  }
+};
 
 // ===== Frames with requestAnimationFrame =====
 const frameImg = new Image();

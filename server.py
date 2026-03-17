@@ -53,11 +53,101 @@ IS_LINUX = sys.platform.startswith("linux")
 
 if IS_MACOS:
     import Quartz
+elif IS_WINDOWS:
+    from ctypes import wintypes
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 
 LOGGER = logging.getLogger(__name__)
+
+
+if IS_WINDOWS:
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _user32.OpenClipboard.argtypes = [wintypes.HWND]
+    _user32.OpenClipboard.restype = wintypes.BOOL
+    _user32.CloseClipboard.argtypes = []
+    _user32.CloseClipboard.restype = wintypes.BOOL
+    _user32.EmptyClipboard.argtypes = []
+    _user32.EmptyClipboard.restype = wintypes.BOOL
+    _user32.GetClipboardData.argtypes = [wintypes.UINT]
+    _user32.GetClipboardData.restype = ctypes.c_void_p
+    _user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+    _user32.SetClipboardData.restype = ctypes.c_void_p
+    _kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    _kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    _kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    _kernel32.GlobalLock.restype = ctypes.c_void_p
+    _kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    _kernel32.GlobalUnlock.restype = wintypes.BOOL
+    _kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    _kernel32.GlobalFree.restype = ctypes.c_void_p
+
+
+    def _open_clipboard_with_retry(retries=5, delay=0.05):
+        for _ in range(retries):
+            if _user32.OpenClipboard(None):
+                return True
+            time.sleep(delay)
+        return False
+
+
+    def _get_windows_clipboard_text():
+        if not _open_clipboard_with_retry():
+            return ""
+        handle = None
+        locked = None
+        try:
+            handle = _user32.GetClipboardData(CF_UNICODETEXT)
+            if not handle:
+                return ""
+            locked = _kernel32.GlobalLock(handle)
+            if not locked:
+                return ""
+            return ctypes.wstring_at(locked)
+        finally:
+            if locked:
+                _kernel32.GlobalUnlock(handle)
+            _user32.CloseClipboard()
+
+
+    def _set_windows_clipboard_text(text):
+        data = (text or "") + "\0"
+        data_size = len(data) * ctypes.sizeof(ctypes.c_wchar)
+        h_global = _kernel32.GlobalAlloc(GMEM_MOVEABLE, data_size)
+        if not h_global:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        locked = None
+        should_free = True
+        try:
+            locked = _kernel32.GlobalLock(h_global)
+            if not locked:
+                raise ctypes.WinError(ctypes.get_last_error())
+
+            ctypes.memmove(locked, ctypes.create_unicode_buffer(data), data_size)
+            _kernel32.GlobalUnlock(h_global)
+            locked = None
+
+            if not _open_clipboard_with_retry():
+                raise RuntimeError("OpenClipboard failed")
+
+            try:
+                if not _user32.EmptyClipboard():
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not _user32.SetClipboardData(CF_UNICODETEXT, h_global):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                should_free = False
+            finally:
+                _user32.CloseClipboard()
+        finally:
+            if locked:
+                _kernel32.GlobalUnlock(h_global)
+            if should_free:
+                _kernel32.GlobalFree(h_global)
 
 
 def resource_path(relative_path):
@@ -618,11 +708,7 @@ def get_clipboard():
             )
             return result.stdout
         elif IS_WINDOWS:
-            result = subprocess.run(
-                ["powershell", "-command", "Get-Clipboard"],
-                capture_output=True, text=True, timeout=5,
-            )
-            return result.stdout.rstrip("\r\n")
+            return _get_windows_clipboard_text().rstrip("\r\n")
         else:
             result = subprocess.run(
                 ["xclip", "-selection", "clipboard", "-o"],
@@ -639,7 +725,7 @@ def set_clipboard(text):
         if IS_MACOS:
             subprocess.run(["pbcopy"], input=text, text=True, timeout=5)
         elif IS_WINDOWS:
-            subprocess.run(["clip"], input=text, text=True, timeout=5)
+            _set_windows_clipboard_text(text)
         else:
             subprocess.run(
                 ["xclip", "-selection", "clipboard"],

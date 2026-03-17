@@ -59,10 +59,17 @@ pyautogui.PAUSE = 0
 
 LOGGER = logging.getLogger(__name__)
 
+
+def resource_path(relative_path):
+    """Resolve bundled resources for normal runs and PyInstaller one-file builds."""
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+
 HOME_DIR = str(Path.home())
 UPLOAD_DIR = os.path.join(HOME_DIR, "Desktop", "RemoteUploads")
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder=resource_path("templates"))
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 socketio = SocketIO(
     app,

@@ -20,6 +20,7 @@
   --orange: #d29922;
   --radius: 8px;
   --toolbar-h: 44px;
+  --bottombar-h: 40px;
   --panel-h: 0px;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -57,7 +58,7 @@ html, body {
 /* ---- Canvas ---- */
 #canvas-wrap {
   position:fixed; top:var(--toolbar-h); left:0; right:0;
-  bottom:var(--panel-h); background:#000; overflow:auto; touch-action:none;
+  bottom:calc(var(--panel-h) + var(--bottombar-h)); background:#000; overflow:auto; touch-action:none;
   transition:bottom .2s;
 }
 #canvas-center {
@@ -82,15 +83,33 @@ html, body {
 .view-only #screen, .view-only #trackpad-area { pointer-events:none; cursor:default; }
 .view-only #screen.overlay { pointer-events:none; cursor:default; }
 #viewonly-badge {
-  display:none; position:fixed; bottom:calc(var(--panel-h) + 8px); right:8px;
+  display:none; position:fixed; bottom:calc(var(--panel-h) + var(--bottombar-h) + 8px); right:8px;
   background:var(--orange); color:#000; padding:4px 12px; border-radius:12px;
   font-size:11px; font-weight:700; z-index:95; pointer-events:none;
 }
 .view-only #viewonly-badge { display:block; }
 
+/* ---- Bottom Action Bar ---- */
+#bottombar {
+  position:fixed; left:0; right:0; bottom:0; height:var(--bottombar-h);
+  background:var(--surface); border-top:1px solid var(--border);
+  display:flex; align-items:center; padding:0 6px; gap:3px; z-index:100;
+  user-select:none; overflow-x:auto; overflow-y:hidden;
+}
+.bb { 
+  background:var(--surface2); border:1px solid var(--border); color:var(--text-dim);
+  padding:5px 0; border-radius:6px; font-size:12px; cursor:pointer;
+  text-align:center; min-width:34px; flex-shrink:0;
+  transition:all .1s; user-select:none; -webkit-user-select:none; line-height:1;
+}
+.bb:active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.bb.sep { background:transparent; border:none; color:var(--border); cursor:default; padding:0 1px; min-width:auto; font-size:14px; }
+.bb.wide { min-width:44px; padding:5px 6px; }
+.bb.arrow { font-size:16px; min-width:32px; }
+
 /* ---- Bottom Panel Container ---- */
 #bottom-panel {
-  position:fixed; left:0; right:0; bottom:0; height:0;
+  position:fixed; left:0; right:0; bottom:var(--bottombar-h); height:0;
   background:var(--surface); border-top:1px solid var(--border);
   z-index:90; overflow:hidden; transition:height .2s;
 }
@@ -278,6 +297,33 @@ html, body {
   </div>
 </div>
 <div id="viewonly-badge">VIEW ONLY</div>
+
+<!-- ===== Bottom Action Bar ===== -->
+<div id="bottombar">
+  <button class="bb wide" id="bb-lclick" title="Left Click">L Click</button>
+  <button class="bb wide" id="bb-rclick" title="Right Click">R Click</button>
+  <button class="bb wide" id="bb-dblclick" title="Double Click">Dbl</button>
+  <span class="bb sep">|</span>
+  <button class="bb" id="bb-sup" title="Scroll Up">&#8593;Scr</button>
+  <button class="bb" id="bb-sdn" title="Scroll Down">&#8595;Scr</button>
+  <span class="bb sep">|</span>
+  <button class="bb arrow" id="bb-left" title="Arrow Left">&larr;</button>
+  <button class="bb arrow" id="bb-down" title="Arrow Down">&darr;</button>
+  <button class="bb arrow" id="bb-up" title="Arrow Up">&uarr;</button>
+  <button class="bb arrow" id="bb-right" title="Arrow Right">&rarr;</button>
+  <span class="bb sep">|</span>
+  <button class="bb" id="bb-esc" title="Escape">Esc</button>
+  <button class="bb" id="bb-tab" title="Tab">Tab</button>
+  <button class="bb" id="bb-enter" title="Enter">&#9166;</button>
+  <button class="bb" id="bb-bksp" title="Backspace">&#9003;</button>
+  <button class="bb" id="bb-space" title="Space">Space</button>
+  <button class="bb" id="bb-del" title="Delete">Del</button>
+  <span class="bb sep">|</span>
+  <button class="bb" id="bb-home" title="Home">Home</button>
+  <button class="bb" id="bb-end" title="End">End</button>
+  <button class="bb" id="bb-pgup" title="Page Up">PgUp</button>
+  <button class="bb" id="bb-pgdn" title="Page Down">PgDn</button>
+</div>
 
 <!-- ===== Bottom Panel ===== -->
 <div id="bottom-panel">
@@ -966,6 +1012,32 @@ $("tp-sdn").onclick = () => { if (viewOnly) return; socket.emit("scroll", { dy: 
 
 ["tp-left","tp-right","tp-dbl","tp-drag","tp-sup","tp-sdn"].forEach(id => {
   $(id).addEventListener("touchstart", (e) => { e.preventDefault(); $(id).click(); }, { passive: false });
+});
+
+// ===== Bottom Action Bar =====
+$("bb-lclick").onclick  = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "left" }); };
+$("bb-rclick").onclick  = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "right" }); };
+$("bb-dblclick").onclick= () => { if (viewOnly) return; socket.emit("dblclick", { x: cursorX, y: cursorY }); };
+$("bb-sup").onclick     = () => { if (viewOnly) return; socket.emit("scroll", { dy: 5 }); };
+$("bb-sdn").onclick     = () => { if (viewOnly) return; socket.emit("scroll", { dy: -5 }); };
+$("bb-left").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowLeft", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-down").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowDown", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-up").onclick      = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowUp", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-right").onclick   = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowRight", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-esc").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "Escape", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-tab").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "Tab", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-enter").onclick   = () => { if (viewOnly) return; socket.emit("keydown", { key: "Enter", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-bksp").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "Backspace", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-space").onclick   = () => { if (viewOnly) return; socket.emit("keydown", { key: " ", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-del").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "Delete", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-home").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "Home", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-end").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "End", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-pgup").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "PageUp", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-pgdn").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "PageDown", ctrl: false, shift: false, alt: false, meta: false }); };
+
+// Touch support for bottom bar buttons
+document.querySelectorAll("#bottombar .bb:not(.sep)").forEach(btn => {
+  btn.addEventListener("touchstart", (e) => { e.preventDefault(); btn.click(); }, { passive: false });
 });
 
 // ===== Clipboard =====

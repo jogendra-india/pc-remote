@@ -20,7 +20,7 @@
   --orange: #d29922;
   --radius: 8px;
   --toolbar-h: 44px;
-  --bottombar-h: 40px;
+  --bottombar-h: 48px;
   --panel-h: 0px;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -89,13 +89,42 @@ html, body {
 }
 .view-only #viewonly-badge { display:block; }
 
+/* ---- Pan Overlay (zoomed-in navigation) ---- */
+#pan-overlay {
+  position:fixed; z-index:92; pointer-events:none;
+  right:16px; bottom:calc(var(--panel-h) + var(--bottombar-h) + 16px);
+  width:110px; height:110px;
+}
+.pan-btn {
+  position:absolute; pointer-events:auto;
+  width:36px; height:36px; border-radius:50%;
+  background:rgba(22,27,34,0.85); border:1px solid var(--border);
+  color:var(--text); font-size:16px; cursor:pointer;
+  display:flex; align-items:center; justify-content:center;
+  transition:background .1s; user-select:none; -webkit-user-select:none;
+  box-shadow:0 2px 6px rgba(0,0,0,.4); backdrop-filter:blur(4px);
+}
+.pan-btn:hover { background:rgba(88,166,255,0.25); }
+.pan-btn:active { background:var(--accent); color:#fff; }
+#pan-up    { top:0;  left:50%; transform:translateX(-50%); }
+#pan-down  { bottom:0; left:50%; transform:translateX(-50%); }
+#pan-left  { left:0; top:50%; transform:translateY(-50%); }
+#pan-right { right:0; top:50%; transform:translateY(-50%); }
+
 /* ---- Bottom Action Bar ---- */
 #bottombar {
-  position:fixed; left:0; right:0; bottom:0; height:var(--bottombar-h);
-  background:var(--surface); border-top:1px solid var(--border);
-  display:flex; align-items:center; padding:0 6px; gap:3px; z-index:100;
+  position:fixed; left:6px; right:6px; bottom:6px; min-height:calc(var(--bottombar-h) - 12px);
+  background:var(--surface); border:1px solid var(--border); border-radius:10px;
+  display:flex; flex-wrap:nowrap; align-items:center; padding:4px 8px; gap:3px; z-index:100;
   user-select:none; overflow-x:auto; overflow-y:hidden;
+  box-shadow:0 2px 8px rgba(0,0,0,.35);
+  padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:thin; scrollbar-color:var(--border) transparent;
 }
+#bottombar::-webkit-scrollbar { height:4px; }
+#bottombar::-webkit-scrollbar-track { background:transparent; }
+#bottombar::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
 .bb { 
   background:var(--surface2); border:1px solid var(--border); color:var(--text-dim);
   padding:5px 0; border-radius:6px; font-size:12px; cursor:pointer;
@@ -106,6 +135,13 @@ html, body {
 .bb.sep { background:transparent; border:none; color:var(--border); cursor:default; padding:0 1px; min-width:auto; font-size:14px; }
 .bb.wide { min-width:44px; padding:5px 6px; }
 .bb.arrow { font-size:16px; min-width:32px; }
+#bb-text-input {
+  width:140px; min-width:100px; flex-shrink:0; height:26px;
+  background:var(--bg); border:1px solid var(--border); border-radius:6px;
+  color:var(--text); font-size:12px; padding:0 6px; outline:none;
+}
+#bb-text-input:focus { border-color:var(--accent); }
+#bb-text-input::placeholder { color:var(--text-dim); font-size:11px; }
 
 /* ---- Bottom Panel Container ---- */
 #bottom-panel {
@@ -298,6 +334,14 @@ html, body {
 </div>
 <div id="viewonly-badge">VIEW ONLY</div>
 
+<!-- ===== Pan Overlay (visible when zoomed) ===== -->
+<div id="pan-overlay" style="display:none">
+  <button class="pan-btn" id="pan-up" title="Pan up">&#9650;</button>
+  <button class="pan-btn" id="pan-left" title="Pan left">&#9664;</button>
+  <button class="pan-btn" id="pan-right" title="Pan right">&#9654;</button>
+  <button class="pan-btn" id="pan-down" title="Pan down">&#9660;</button>
+</div>
+
 <!-- ===== Bottom Action Bar ===== -->
 <div id="bottombar">
   <button class="bb wide" id="bb-lclick" title="Left Click">L Click</button>
@@ -323,6 +367,12 @@ html, body {
   <button class="bb" id="bb-end" title="End">End</button>
   <button class="bb" id="bb-pgup" title="Page Up">PgUp</button>
   <button class="bb" id="bb-pgdn" title="Page Down">PgDn</button>
+  <span class="bb sep">|</span>
+  <button class="bb" id="bb-mclick" title="Middle Click">Mid</button>
+  <span class="bb sep">|</span>
+  <input type="text" id="bb-text-input" placeholder="Type text & push…" autocomplete="off" spellcheck="false">
+  <button class="bb wide" id="bb-text-push" title="Push text to remote cursor">Push</button>
+
 </div>
 
 <!-- ===== Bottom Panel ===== -->
@@ -371,6 +421,19 @@ html, body {
         <button class="vk-key shortcut" data-hk="alt+shift+f">&#8997;&#8679;F</button>
         <button class="vk-key shortcut" data-hk="cmd+shift+l">&#8984;&#8679;L</button>
         <button class="vk-key shortcut" data-hk="ctrl+c">&#8963;C</button>
+      </div>
+    </div>
+    <div class="vk-section">
+      <div class="vk-label sc-label">Screenshot &amp; System</div>
+      <div class="vk-row">
+        <button class="vk-key shortcut sc-key" data-hk="cmd+shift+3">&#8984;&#8679;3</button>
+        <button class="vk-key shortcut sc-key" data-hk="cmd+shift+4">&#8984;&#8679;4</button>
+        <button class="vk-key shortcut sc-key" data-hk="cmd+shift+5">&#8984;&#8679;5</button>
+        <button class="vk-key shortcut sc-key" data-hk="cmd+shift+6">&#8984;&#8679;6</button>
+        <button class="vk-key shortcut sc-key" data-hk="cmd+ctrl+q">&#8984;&#8963;Q</button>
+        <button class="vk-key shortcut sc-key" data-hk="cmd+space">&#8984;Space</button>
+        <button class="vk-key shortcut sc-key" data-hk="cmd+alt+Escape">&#8984;&#8997;Esc</button>
+        <button class="vk-key shortcut sc-key" data-hk="ctrl+alt+Delete">&#8963;&#8997;Del</button>
       </div>
     </div>
     <div class="vk-section">
@@ -540,6 +603,18 @@ let zoomLevel = 1, baseFitW = 100, baseFitH = 100;
 // Sticky modifiers
 const mods = { ctrl: false, alt: false, cmd: false, shift: false };
 const isMacBrowser = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+let isRemoteMac = true; // default; will be updated from screen_info
+
+function adaptShortcutLabels(remoteOS) {
+  isRemoteMac = (remoteOS === "macos");
+  if (!isRemoteMac) {
+    document.querySelectorAll(".vk-key.shortcut, .sc-label").forEach(el => {
+      el.innerHTML = el.innerHTML.replace(/\u2318/g, "Ctrl").replace(/\u2963/g, "Ctrl").replace(/\u2325/g, "Alt");
+    });
+    const cmdModBtn = document.querySelector('.vk-key.mod[data-mod="cmd"]');
+    if (cmdModBtn) cmdModBtn.innerHTML = "Ctrl/Win";
+  }
+}
 
 // Active panel
 let activePanel = null;
@@ -591,6 +666,8 @@ socket.on("disconnect", () => {
 });
 socket.on("screen_info", (d) => {
   screenW = d.width; screenH = d.height;
+
+  if (d.os) adaptShortcutLabels(d.os);
 
   // Populate monitor selector
   if (d.monitors && d.monitors.length > 0) {
@@ -783,6 +860,7 @@ function applyZoom() {
   canvasCenter.style.minWidth = zoomLevel <= 1.01 ? "100%" : w + "px";
   canvasCenter.style.minHeight = zoomLevel <= 1.01 ? "100%" : h + "px";
   $("zoom-label").textContent = zoomLevel === 1 ? "Fit" : Math.round(zoomLevel * 100) + "%";
+  if (typeof updatePanButtons === "function") updatePanButtons();
 }
 function setZoom(z) { zoomLevel = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(z * 4) / 4)); applyZoom(); }
 window.addEventListener("resize", () => { recalcFit(); applyZoom(); });
@@ -833,9 +911,17 @@ function getActiveMods() {
   if (mods.shift) m.push("shift");
   return m;
 }
+let modsTimer = null;
 function releaseMods() {
   mods.ctrl = mods.alt = mods.cmd = mods.shift = false;
   document.querySelectorAll(".vk-key.mod").forEach(b => b.classList.remove("held"));
+  clearTimeout(modsTimer);
+}
+function scheduleModsClear() {
+  clearTimeout(modsTimer);
+  if (mods.ctrl || mods.alt || mods.cmd || mods.shift) {
+    modsTimer = setTimeout(() => { releaseMods(); showToast("Sticky mods auto-cleared"); }, 8000);
+  }
 }
 function sendKeyWithMods(key) {
   if (viewOnly) return;
@@ -855,6 +941,7 @@ document.querySelectorAll(".vk-key.mod").forEach(btn => {
     const mod = btn.dataset.mod;
     mods[mod] = !mods[mod];
     btn.classList.toggle("held", mods[mod]);
+    scheduleModsClear();
   });
   btn.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
 });
@@ -1034,11 +1121,59 @@ $("bb-home").onclick    = () => { if (viewOnly) return; socket.emit("keydown", {
 $("bb-end").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "End", ctrl: false, shift: false, alt: false, meta: false }); };
 $("bb-pgup").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "PageUp", ctrl: false, shift: false, alt: false, meta: false }); };
 $("bb-pgdn").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "PageDown", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-mclick").onclick  = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "middle" }); };
 
-// Touch support for bottom bar buttons
-document.querySelectorAll("#bottombar .bb:not(.sep)").forEach(btn => {
-  btn.addEventListener("touchstart", (e) => { e.preventDefault(); btn.click(); }, { passive: false });
+// Text push — type text at remote cursor position
+$("bb-text-push").onclick = () => {
+  if (viewOnly) return;
+  const inp = $("bb-text-input");
+  const txt = inp.value;
+  if (!txt) return;
+  socket.emit("type_text", { text: txt });
+  inp.value = "";
+  showToast("Text pushed");
+  setTimeout(() => canvas.focus(), 50);
+};
+$("bb-text-input").addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "Enter") { e.preventDefault(); $("bb-text-push").click(); }
 });
+
+// Pan overlay arrows (visible only when zoomed in, hold-to-repeat)
+const PAN_STEP = 8;
+let panInterval = null;
+function startPan(dx, dy) {
+  canvasWrap.scrollBy(dx, dy);
+  clearInterval(panInterval);
+  panInterval = setInterval(() => canvasWrap.scrollBy(dx, dy), 30);
+}
+function stopPan() { clearInterval(panInterval); panInterval = null; }
+
+["pan-left","pan-right","pan-up","pan-down"].forEach(id => {
+  const dirs = { "pan-left":[-PAN_STEP,0], "pan-right":[PAN_STEP,0], "pan-up":[0,-PAN_STEP], "pan-down":[0,PAN_STEP] };
+  const [dx,dy] = dirs[id];
+  $(id).addEventListener("mousedown", (e) => { e.preventDefault(); startPan(dx, dy); });
+  $(id).addEventListener("touchstart", (e) => { e.preventDefault(); startPan(dx, dy); }, { passive: false });
+});
+window.addEventListener("mouseup", stopPan);
+window.addEventListener("touchend", stopPan);
+
+function updatePanButtons() {
+  $("pan-overlay").style.display = zoomLevel > 1.05 ? "" : "none";
+}
+
+// Touch support + refocus canvas after bottom bar clicks
+document.querySelectorAll("#bottombar .bb:not(.sep)").forEach(btn => {
+  btn.addEventListener("mouseup", () => setTimeout(() => canvas.focus(), 50));
+});
+
+// Convert vertical mouse wheel to horizontal scroll on the bottom bar
+$("bottombar").addEventListener("wheel", (e) => {
+  if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+    e.preventDefault();
+    $("bottombar").scrollLeft += e.deltaY;
+  }
+}, { passive: false });
 
 // ===== Clipboard =====
 socket.on("clipboard_content", async (d) => {
@@ -1274,12 +1409,27 @@ function buildModList(e) {
   return allMods;
 }
 
+let _lastKeyTs = 0, _lastKeyVal = "";
 function handleKeyDown(e) {
   if (!isConnected || viewOnly) return;
   if ($("settings-overlay").classList.contains("open")) return;
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-  if (["Shift","Control","Alt","Meta"].includes(e.key)) return;
+  if (["Shift","Control","Alt","Meta","Fn","FnLock"].includes(e.key)) return;
   e.preventDefault();
+
+  // Guard against rapid duplicate key events (OS autorepeat or ghost events)
+  const now = Date.now();
+  if (e.key === _lastKeyVal && now - _lastKeyTs < 80 && !e.repeat) return;
+  _lastKeyTs = now; _lastKeyVal = e.key;
+
+  // When zoomed in + Shift held, arrow keys pan the local view
+  if (zoomLevel > 1.05 && e.shiftKey && ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key)) {
+    const s = 100;
+    const map = { ArrowLeft: [-s,0], ArrowRight: [s,0], ArrowUp: [0,-s], ArrowDown: [0,s] };
+    const [dx, dy] = map[e.key];
+    canvasWrap.scrollBy({ left: dx, top: dy, behavior: "smooth" });
+    return;
+  }
 
   // Intercept paste — sync browser clipboard to remote first
   if ((e.key === 'v' || e.key === 'V') && (e.ctrlKey || e.metaKey)) {
@@ -1304,6 +1454,10 @@ function handleKeyDown(e) {
   }
 }
 canvas.addEventListener("keydown", handleKeyDown);
+
+// Release any physical modifier that might stick on blur/focus change
+window.addEventListener("blur", () => { releaseMods(); });
+canvas.addEventListener("focus", () => { _lastKeyVal = ""; });
 
 // NKB keydown
 $("kb-input").addEventListener("keydown", (e) => {
@@ -1471,18 +1625,33 @@ socket.on("pong_check", (d) => {
 
 // ===== Screenshot =====
 $("btn-screenshot").onclick = () => {
-  const link = document.createElement("a");
-  link.download = "screenshot_" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
-  if (useWebRTC && screenVideo.videoWidth) {
-    const sc = document.createElement("canvas");
-    sc.width = screenVideo.videoWidth; sc.height = screenVideo.videoHeight;
-    sc.getContext("2d").drawImage(screenVideo, 0, 0);
-    link.href = sc.toDataURL("image/png");
-  } else {
-    link.href = canvas.toDataURL("image/png");
-  }
-  link.click();
-  showToast("Screenshot saved");
+  showToast("Capturing HD screenshot…");
+  const url = BASE + "/api/screenshot";
+  fetch(url).then(r => {
+    if (!r.ok) throw new Error("Server error");
+    return r.blob();
+  }).then(blob => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "screenshot_" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast("HD screenshot saved");
+  }).catch(() => {
+    // Fallback to client-side capture
+    const link = document.createElement("a");
+    link.download = "screenshot_" + new Date().toISOString().replace(/[:.]/g, "-") + ".png";
+    if (useWebRTC && screenVideo.videoWidth) {
+      const sc = document.createElement("canvas");
+      sc.width = screenVideo.videoWidth; sc.height = screenVideo.videoHeight;
+      sc.getContext("2d").drawImage(screenVideo, 0, 0);
+      link.href = sc.toDataURL("image/png");
+    } else {
+      link.href = canvas.toDataURL("image/png");
+    }
+    link.click();
+    showToast("Screenshot saved (fallback)");
+  });
 };
 
 // ===== View-Only Mode =====

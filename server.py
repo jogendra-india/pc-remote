@@ -246,6 +246,8 @@ KEY_MAP = {
     "PageUp": "pageup",
     "PageDown": "pagedown",
     " ": "space",
+    "space": "space",
+    "Space": "space",
     "CapsLock": "capslock",
     "F1": "f1", "F2": "f2", "F3": "f3", "F4": "f4",
     "F5": "f5", "F6": "f6", "F7": "f7", "F8": "f8",
@@ -1019,6 +1021,32 @@ def download_file():
     return send_file(abs_path, as_attachment=True)
 
 
+@app.route("/api/screenshot")
+def api_screenshot():
+    """Full-resolution screenshot of the active monitor as PNG."""
+    with mss.mss() as sct:
+        mon_idx = settings.get("monitor", 1)
+        if mon_idx < 0 or mon_idx >= len(sct.monitors):
+            mon_idx = 1
+        monitor = sct.monitors[mon_idx]
+        img = sct.grab(monitor)
+        pil_img = Image.frombytes("RGB", img.size, img.rgb)
+
+        try:
+            cursor_data = get_cursor_info(img.size[0], monitor)
+            if cursor_data:
+                cur_img, cx, cy = cursor_data
+                pil_img.paste(cur_img, (cx, cy), cur_img)
+        except Exception:
+            pass
+
+        buf = BytesIO()
+        pil_img.save(buf, format="PNG", optimize=False)
+        buf.seek(0)
+        ts = int(time.time())
+        return send_file(buf, mimetype="image/png", download_name=f"screenshot_{ts}.png", as_attachment=True)
+
+
 @app.route("/api/files")
 def list_files():
     path = request.args.get("path", HOME_DIR)
@@ -1070,6 +1098,7 @@ def on_connect():
             "webrtc": HAS_WEBRTC,
             "monitors": monitors,
             "active_monitor": settings["monitor"],
+            "os": "macos" if IS_MACOS else "windows" if IS_WINDOWS else "linux",
         },
         to=request.sid,
     )
@@ -1240,6 +1269,15 @@ def on_hotkey(data):
     modifiers = data.get("modifiers", [])
     key = data.get("key", "")
 
+    # On macOS, if the browser already resolved the character (e.g. "@" from Shift+2),
+    # use Quartz to type it directly — avoids double-shift bugs with pyautogui.
+    if IS_MACOS and modifiers == ["shift"] and len(key) == 1 and not key.isalpha():
+        try:
+            _type_char_quartz(key)
+            return
+        except Exception:
+            pass
+
     mapped_mods = [MOD_MAP[m] for m in modifiers if m in MOD_MAP]
 
     mapped_key = KEY_MAP.get(key)
@@ -1254,6 +1292,17 @@ def on_hotkey(data):
         LOGGER.exception("hotkey error mods=%s key=%s", modifiers, key)
 
 
+if IS_MACOS:
+    def _type_char_quartz(ch):
+        """Type a single character using Quartz CGEvents — bypasses pyautogui key mapping."""
+        ev_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
+        Quartz.CGEventKeyboardSetUnicodeString(ev_down, len(ch), ch)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_down)
+        ev_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
+        Quartz.CGEventKeyboardSetUnicodeString(ev_up, len(ch), ch)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_up)
+
+
 @socketio.on("type_text")
 def on_type_text(data):
     """Type a string of text, one character at a time."""
@@ -1263,20 +1312,27 @@ def on_type_text(data):
     for ch in text:
         if ch == "\n":
             pyautogui.press("enter", _pause=False)
-            time.sleep(0.02)
+            time.sleep(0.03)
             continue
-        mapped = KEY_MAP.get(ch)
-        if mapped is None and len(ch) == 1:
-            mapped = ch.lower()
-        if mapped:
+        if IS_MACOS:
             try:
-                if ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?':
-                    pyautogui.hotkey("shift", mapped, _pause=False)
-                else:
-                    pyautogui.press(mapped, _pause=False)
+                _type_char_quartz(ch)
             except Exception:
-                pass
-        time.sleep(0.02)
+                LOGGER.debug("Quartz type_char failed for %r, falling back", ch)
+                pyautogui.press(ch.lower() if len(ch) == 1 else ch, _pause=False)
+        else:
+            mapped = KEY_MAP.get(ch)
+            if mapped is None and len(ch) == 1:
+                mapped = ch.lower()
+            if mapped:
+                try:
+                    if ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?':
+                        pyautogui.hotkey("shift", mapped, _pause=False)
+                    else:
+                        pyautogui.press(mapped, _pause=False)
+                except Exception:
+                    pass
+        time.sleep(0.03)
 
 
 # ---------------------------------------------------------------------------

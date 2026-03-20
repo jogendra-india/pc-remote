@@ -690,15 +690,18 @@ socket.on("monitor_changed", (d) => {
   showToast("Switched to " + d.label + " (" + d.width + "x" + d.height + ")");
 });
 
+let _monitorSwitching = false;
 $("monitor-sel").onchange = () => {
   const idx = parseInt($("monitor-sel").value);
   socket.emit("select_monitor", { index: idx });
-  // If using WebRTC, renegotiate to get the new resolution
   if (useWebRTC && rtcPC) {
+    _monitorSwitching = true;
+    rtcPC.onconnectionstatechange = null;
     rtcPC.close();
     rtcPC = null;
     useWebRTC = false;
-    setTimeout(() => startWebRTC(), 500);
+    showToast("Switching monitor…");
+    setTimeout(() => { _monitorSwitching = false; startWebRTC(); }, 600);
   }
 };
 
@@ -785,8 +788,9 @@ function startWebRTC() {
   };
 
   rtcPC.onconnectionstatechange = () => {
-    LOGGER.log("WebRTC state:", rtcPC.connectionState);
-    if (rtcPC.connectionState === "failed" || rtcPC.connectionState === "disconnected") {
+    if (_monitorSwitching) return;
+    LOGGER.log("WebRTC state:", rtcPC ? rtcPC.connectionState : "null");
+    if (rtcPC && (rtcPC.connectionState === "failed" || rtcPC.connectionState === "disconnected")) {
       useWebRTC = false;
       screenVideo.classList.add("hidden");
       canvas.classList.remove("overlay");

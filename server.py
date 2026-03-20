@@ -738,29 +738,7 @@ def set_clipboard(text):
 
 
 # ---------------------------------------------------------------------------
-# Clipboard auto-sync — polls remote clipboard and pushes changes to browser
-# ---------------------------------------------------------------------------
-
-_last_clipboard_content = ""
-
-
-def clipboard_sync_worker():
-    global _last_clipboard_content
-    while True:
-        try:
-            with clients_lock:
-                has_clients = bool(connected_clients)
-            if not has_clients:
-                time.sleep(5)
-                continue
-            current = get_clipboard() or ""
-            if current != _last_clipboard_content:
-                _last_clipboard_content = current
-                if current:
-                    socketio.emit("clipboard_changed", {"text": current})
-        except Exception:
-            pass
-        time.sleep(5)
+# Clipboard auto-sync removed — was polling every 5s causing CPU/GIL overhead
 
 
 # ---------------------------------------------------------------------------
@@ -1649,9 +1627,6 @@ if __name__ == "__main__":
 
     stream_thread = threading.Thread(target=capture_and_stream, daemon=True)
     stream_thread.start()
-
-    clipboard_thread = threading.Thread(target=clipboard_sync_worker, daemon=True)
-    clipboard_thread.start()
 
     local_ip = get_local_ip()
     port = 5050

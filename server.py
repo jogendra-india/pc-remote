@@ -588,59 +588,79 @@ elif IS_WINDOWS:
         _cur_u32.ReleaseDC(0, hdc_s)
         return Image.frombuffer("RGBA", (cw, ch), bytes(raw), "raw", "BGRA", 0, 1)
 
-    _win_cursor_warned = False
+    _win_cursor_bitmap_warned = False
+
+    def _get_win_cursor_pos():
+        """Return (x, y) in screen pixels via GetCursorPos — almost never fails."""
+        pt = _POINT_CI()
+        if _cur_u32.GetCursorPos(ctypes.byref(pt)):
+            return pt.x, pt.y
+        return None
+
+    def _try_native_cursor_bitmap():
+        """Try GetCursorInfo → GetIconInfo → DrawIconEx.  Returns (img, hx, hy) or None."""
+        ci = _CURSORINFO()
+        ci.cbSize = ctypes.sizeof(_CURSORINFO)
+        if not _cur_u32.GetCursorInfo(ctypes.byref(ci)):
+            return None
+        ck = ci.hCursor
+        if not ck:
+            return None
+        if ck in _cursor_cache:
+            return _cursor_cache[ck]
+        ii = _ICONINFO()
+        if not _cur_u32.GetIconInfo(ck, ctypes.byref(ii)):
+            return None
+        hx, hy = ii.xHotspot, ii.yHotspot
+        cw = _cur_u32.GetSystemMetrics(13) or 32
+        ch = _cur_u32.GetSystemMetrics(14) or 32
+        img = _render_win_cursor(ck, cw, ch)
+        if ii.hbmMask:
+            _cur_g32.DeleteObject(ii.hbmMask)
+        if ii.hbmColor:
+            _cur_g32.DeleteObject(ii.hbmColor)
+        if img is None:
+            return None
+        _cursor_cache[ck] = (img, hx, hy)
+        return img, hx, hy
 
     def get_cursor_info(screenshot_width, monitor=None):
-        global _win_cursor_warned
+        global _win_cursor_bitmap_warned
         try:
-            ci = _CURSORINFO()
-            ci.cbSize = ctypes.sizeof(_CURSORINFO)
-            if not _cur_u32.GetCursorInfo(ctypes.byref(ci)):
-                if not _win_cursor_warned:
-                    LOGGER.warning("GetCursorInfo failed (err=%s)", ctypes.get_last_error())
-                    _win_cursor_warned = True
+            pos = _get_win_cursor_pos()
+            if pos is None:
                 return None
-            if not (ci.flags & 1):
-                return None
+            scr_x, scr_y = pos
 
-            ck = ci.hCursor
-            if ck not in _cursor_cache:
-                cursor_img = None
-                hx, hy = 0, 0
-                try:
-                    ii = _ICONINFO()
-                    if _cur_u32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
-                        hx, hy = ii.xHotspot, ii.yHotspot
-                        cw = _cur_u32.GetSystemMetrics(13) or 32
-                        ch = _cur_u32.GetSystemMetrics(14) or 32
-                        cursor_img = _render_win_cursor(ci.hCursor, cw, ch)
-                        if ii.hbmMask:
-                            _cur_g32.DeleteObject(ii.hbmMask)
-                        if ii.hbmColor:
-                            _cur_g32.DeleteObject(ii.hbmColor)
-                    else:
-                        LOGGER.debug("GetIconInfo failed for hCursor=%s, using fallback arrow", ck)
-                except Exception:
-                    LOGGER.debug("Cursor bitmap extraction failed, using fallback arrow", exc_info=True)
+            # Best-effort native cursor bitmap; fall back to static arrow
+            bitmap_result = None
+            try:
+                bitmap_result = _try_native_cursor_bitmap()
+            except Exception:
+                if not _win_cursor_bitmap_warned:
+                    LOGGER.warning("Native cursor bitmap extraction failed, using fallback arrow", exc_info=True)
+                    _win_cursor_bitmap_warned = True
 
-                if cursor_img is None:
-                    dpi = screenshot_width / (monitor["width"] if monitor else logical_width)
-                    cursor_img = _make_arrow_cursor(scale=max(1, dpi))
-                    hx, hy = 0, 0
-                _cursor_cache[ck] = (cursor_img, hx, hy)
+            if bitmap_result:
+                cursor_img, hx, hy = bitmap_result
+            else:
+                dpi = screenshot_width / (monitor["width"] if monitor else logical_width)
+                cache_key = f"fallback_arrow_{dpi:.2f}"
+                if cache_key not in _cursor_cache:
+                    _cursor_cache[cache_key] = (_make_arrow_cursor(scale=max(1, dpi)), 0, 0)
+                cursor_img, hx, hy = _cursor_cache[cache_key]
 
-            cursor_img, hx, hy = _cursor_cache[ck]
             if monitor:
                 dpi = screenshot_width / monitor["width"]
-                px = int((ci.ptScreenPos.x - monitor["left"]) * dpi - hx)
-                py = int((ci.ptScreenPos.y - monitor["top"]) * dpi - hy)
+                px = int((scr_x - monitor["left"]) * dpi - hx)
+                py = int((scr_y - monitor["top"]) * dpi - hy)
             else:
                 dpi = screenshot_width / logical_width
-                px = int(ci.ptScreenPos.x * dpi - hx)
-                py = int(ci.ptScreenPos.y * dpi - hy)
+                px = int(scr_x * dpi - hx)
+                py = int(scr_y * dpi - hy)
             return cursor_img, px, py
         except Exception:
-            LOGGER.exception("get_cursor_info failed")
+            LOGGER.exception("get_cursor_info failed entirely")
             return None
 
 else:  # Linux
@@ -934,9 +954,10 @@ def capture_and_stream():
                     + raw[-chunk:]
                 )
                 time_since_last = frame_start - last_sent
+                cursor_changed = cur_pos != prev_cur_pos
                 if (
                     sample == prev_sample
-                    and cur_pos == prev_cur_pos
+                    and not cursor_changed
                     and time_since_last < MIN_SEND_INTERVAL
                 ):
                     elapsed = time.monotonic() - frame_start
@@ -972,12 +993,16 @@ def capture_and_stream():
                     pil_img.save(buf, format="JPEG", quality=settings["quality"], optimize=False)
                     mime = "image/jpeg"
                 frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                socketio.emit("frame", {
+                frame_payload = {
                     "img": frame_b64,
                     "w": logical_width,
                     "h": logical_height,
                     "fmt": mime,
-                })
+                }
+                if cur_pos is not None:
+                    frame_payload["cx"] = cur_pos[0] / (scr_w or 1)
+                    frame_payload["cy"] = cur_pos[1] / (img.size[1] or 1)
+                socketio.emit("frame", frame_payload)
                 last_sent = time.monotonic()
             except Exception:
                 LOGGER.exception("Screen capture error")

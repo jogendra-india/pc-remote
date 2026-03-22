@@ -664,6 +664,7 @@ socket.on("disconnect", () => {
   $("status-dot").classList.remove("connected");
   $("status-text").textContent = "Disconnected";
   $("connect-banner").classList.remove("hidden");
+  _cleanupWebRTC();
 });
 socket.on("screen_info", (d) => {
   screenW = d.width; screenH = d.height;
@@ -695,12 +696,9 @@ let _monitorSwitching = false;
 $("monitor-sel").onchange = () => {
   const idx = parseInt($("monitor-sel").value);
   socket.emit("select_monitor", { index: idx });
-  if (useWebRTC && rtcPC) {
+  if (useWebRTC || rtcPC) {
     _monitorSwitching = true;
-    rtcPC.onconnectionstatechange = null;
-    rtcPC.close();
-    rtcPC = null;
-    useWebRTC = false;
+    _cleanupWebRTC();
     showToast("Switching monitor…");
     setTimeout(() => { _monitorSwitching = false; startWebRTC(); }, 600);
   }
@@ -753,15 +751,43 @@ setInterval(() => {
 }, 1000);
 
 // ===== WebRTC =====
+const WEBRTC_CONNECT_TIMEOUT_MS = 10000;
+let _rtcTimeout = null;
+
+function _cleanupWebRTC() {
+  clearTimeout(_rtcTimeout);
+  _rtcTimeout = null;
+  if (rtcPC) {
+    rtcPC.onconnectionstatechange = null;
+    rtcPC.ontrack = null;
+    rtcPC.onicecandidate = null;
+    rtcPC.close();
+    rtcPC = null;
+  }
+  useWebRTC = false;
+  screenVideo.classList.add("hidden");
+  canvas.classList.remove("overlay");
+}
+
 function startWebRTC() {
-  if (rtcPC) { rtcPC.close(); rtcPC = null; }
+  _cleanupWebRTC();
   rtcPC = new RTCPeerConnection({
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
 
+  _rtcTimeout = setTimeout(() => {
+    if (rtcPC && rtcPC.connectionState !== "connected") {
+      LOGGER.log("WebRTC connect timeout after " + WEBRTC_CONNECT_TIMEOUT_MS + "ms — falling back to Socket.IO");
+      _cleanupWebRTC();
+      showToast("WebRTC timed out — using Socket.IO");
+    }
+  }, WEBRTC_CONNECT_TIMEOUT_MS);
+
   rtcPC.addTransceiver("video", { direction: "recvonly" });
 
   rtcPC.ontrack = (ev) => {
+    clearTimeout(_rtcTimeout);
+    _rtcTimeout = null;
     screenVideo.srcObject = ev.streams[0];
     screenVideo.classList.remove("hidden");
     canvas.classList.add("overlay");
@@ -793,10 +819,12 @@ function startWebRTC() {
   rtcPC.onconnectionstatechange = () => {
     if (_monitorSwitching) return;
     LOGGER.log("WebRTC state:", rtcPC ? rtcPC.connectionState : "null");
+    if (rtcPC && rtcPC.connectionState === "connected") {
+      clearTimeout(_rtcTimeout);
+      _rtcTimeout = null;
+    }
     if (rtcPC && (rtcPC.connectionState === "failed" || rtcPC.connectionState === "disconnected")) {
-      useWebRTC = false;
-      screenVideo.classList.add("hidden");
-      canvas.classList.remove("overlay");
+      _cleanupWebRTC();
       showToast("WebRTC disconnected — falling back to Socket.IO");
     }
   };
@@ -810,6 +838,7 @@ function startWebRTC() {
     });
   }).catch(err => {
     LOGGER.error("WebRTC offer failed:", err);
+    _cleanupWebRTC();
     showToast("WebRTC setup failed — using Socket.IO fallback");
   });
 }

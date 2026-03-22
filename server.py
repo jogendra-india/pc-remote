@@ -563,6 +563,40 @@ elif IS_WINDOWS:
     _cur_u32 = ctypes.windll.user32
     _cur_g32 = ctypes.windll.gdi32
 
+    # On 64-bit Windows, GDI/user32 handles are 64-bit pointers.  Without
+    # explicit argtypes, ctypes defaults to c_int (32-bit) which overflows
+    # when the handle value exceeds 2^31.
+    _cur_g32.DeleteObject.argtypes = [ctypes.c_void_p]
+    _cur_g32.DeleteObject.restype = ctypes.c_int
+    _cur_g32.DeleteDC.argtypes = [ctypes.c_void_p]
+    _cur_g32.DeleteDC.restype = ctypes.c_int
+    _cur_g32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    _cur_g32.CreateCompatibleDC.restype = ctypes.c_void_p
+    _cur_g32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _cur_g32.SelectObject.restype = ctypes.c_void_p
+    _cur_g32.CreateDIBSection.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint,
+    ]
+    _cur_g32.CreateDIBSection.restype = ctypes.c_void_p
+    _cur_u32.GetDC.argtypes = [ctypes.c_void_p]
+    _cur_u32.GetDC.restype = ctypes.c_void_p
+    _cur_u32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _cur_u32.ReleaseDC.restype = ctypes.c_int
+    _cur_u32.DrawIconEx.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
+    ]
+    _cur_u32.DrawIconEx.restype = ctypes.c_int
+    _cur_u32.GetIconInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _cur_u32.GetIconInfo.restype = ctypes.c_int
+    _cur_u32.GetCursorInfo.argtypes = [ctypes.c_void_p]
+    _cur_u32.GetCursorInfo.restype = ctypes.c_int
+    _cur_u32.GetCursorPos.argtypes = [ctypes.c_void_p]
+    _cur_u32.GetCursorPos.restype = ctypes.c_int
+    _cur_u32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    _cur_u32.GetSystemMetrics.restype = ctypes.c_int
+
     def _render_win_cursor(h_cursor, cw, ch):
         hdc_s = _cur_u32.GetDC(0)
         hdc_m = _cur_g32.CreateCompatibleDC(hdc_s)
@@ -1147,9 +1181,9 @@ def on_disconnect():
     sid = request.sid
     with clients_lock:
         connected_clients.discard(sid)
-    if HAS_WEBRTC and sid in _peer_connections:
-        pc = _peer_connections.pop(sid)
-        if _webrtc_loop and _webrtc_loop.is_running():
+    if HAS_WEBRTC:
+        pc = _peer_connections.pop(sid, None)
+        if pc and _webrtc_loop and _webrtc_loop.is_running():
             asyncio.run_coroutine_threadsafe(pc.close(), _webrtc_loop)
     LOGGER.info("Client disconnected: %s (total: %d)", sid, len(connected_clients))
 
@@ -1447,32 +1481,38 @@ if HAS_WEBRTC:
         sid = request.sid
 
         async def _handle_offer():
-            if sid in _peer_connections:
-                old_pc = _peer_connections.pop(sid)
-                await old_pc.close()
+            try:
+                if sid in _peer_connections:
+                    old_pc = _peer_connections.pop(sid)
+                    await old_pc.close()
 
-            pc = RTCPeerConnection()
-            _peer_connections[sid] = pc
+                pc = RTCPeerConnection()
+                _peer_connections[sid] = pc
 
-            @pc.on("connectionstatechange")
-            async def on_state_change():
-                LOGGER.info("WebRTC state [%s]: %s", sid, pc.connectionState)
-                if pc.connectionState in ("failed", "closed"):
-                    if sid in _peer_connections:
-                        _peer_connections.pop(sid)
+                @pc.on("connectionstatechange")
+                async def on_state_change():
+                    LOGGER.info("WebRTC state [%s]: %s", sid, pc.connectionState)
+                    if pc.connectionState in ("failed", "closed"):
+                        _peer_connections.pop(sid, None)
 
-            pc.addTrack(ScreenShareTrack())
+                pc.addTrack(ScreenShareTrack())
 
-            offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
-            await pc.setRemoteDescription(offer)
-            answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
+                offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+                await pc.setRemoteDescription(offer)
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
 
-            socketio.emit("webrtc_answer", {
-                "sdp": pc.localDescription.sdp,
-                "type": pc.localDescription.type,
-            }, to=sid)
+                socketio.emit("webrtc_answer", {
+                    "sdp": pc.localDescription.sdp,
+                    "type": pc.localDescription.type,
+                }, to=sid)
+            except Exception:
+                LOGGER.exception("WebRTC offer handler failed for %s", sid)
+                _peer_connections.pop(sid, None)
 
+        if not _webrtc_loop or not _webrtc_loop.is_running():
+            LOGGER.warning("WebRTC event loop not running, ignoring offer from %s", sid)
+            return
         asyncio.run_coroutine_threadsafe(_handle_offer(), _webrtc_loop)
 
     @socketio.on("webrtc_ice")

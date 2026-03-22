@@ -55,6 +55,21 @@ if IS_MACOS:
     import Quartz
 elif IS_WINDOWS:
     from ctypes import wintypes
+    # Must be called before ANY Win32 coordinate API (pyautogui.size, mss,
+    # GetCursorInfo, etc.) so that logical/physical pixel values are consistent
+    # across all calls.  Without this, display scaling (125 %, 150 %, …) causes
+    # mss screenshots vs GetCursorInfo coordinates to disagree, and the
+    # composited cursor appears at wrong position or is off-screen entirely.
+    try:
+        _shcore = ctypes.WinDLL("shcore", use_last_error=True)
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        _shcore.SetProcessDpiAwareness(2)
+    except (OSError, AttributeError):
+        # shcore unavailable (Windows 7) → fall back to user32
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (OSError, AttributeError):
+            pass
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
@@ -573,29 +588,47 @@ elif IS_WINDOWS:
         _cur_u32.ReleaseDC(0, hdc_s)
         return Image.frombuffer("RGBA", (cw, ch), bytes(raw), "raw", "BGRA", 0, 1)
 
+    _win_cursor_warned = False
+
     def get_cursor_info(screenshot_width, monitor=None):
+        global _win_cursor_warned
         try:
             ci = _CURSORINFO()
             ci.cbSize = ctypes.sizeof(_CURSORINFO)
             if not _cur_u32.GetCursorInfo(ctypes.byref(ci)):
+                if not _win_cursor_warned:
+                    LOGGER.warning("GetCursorInfo failed (err=%s)", ctypes.get_last_error())
+                    _win_cursor_warned = True
                 return None
             if not (ci.flags & 1):
                 return None
+
             ck = ci.hCursor
             if ck not in _cursor_cache:
-                ii = _ICONINFO()
-                if not _cur_u32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
-                    return None
-                cw = _cur_u32.GetSystemMetrics(13) or 32
-                ch = _cur_u32.GetSystemMetrics(14) or 32
-                img = _render_win_cursor(ci.hCursor, cw, ch)
-                if ii.hbmMask:
-                    _cur_g32.DeleteObject(ii.hbmMask)
-                if ii.hbmColor:
-                    _cur_g32.DeleteObject(ii.hbmColor)
-                if img is None:
-                    return None
-                _cursor_cache[ck] = (img, ii.xHotspot, ii.yHotspot)
+                cursor_img = None
+                hx, hy = 0, 0
+                try:
+                    ii = _ICONINFO()
+                    if _cur_u32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
+                        hx, hy = ii.xHotspot, ii.yHotspot
+                        cw = _cur_u32.GetSystemMetrics(13) or 32
+                        ch = _cur_u32.GetSystemMetrics(14) or 32
+                        cursor_img = _render_win_cursor(ci.hCursor, cw, ch)
+                        if ii.hbmMask:
+                            _cur_g32.DeleteObject(ii.hbmMask)
+                        if ii.hbmColor:
+                            _cur_g32.DeleteObject(ii.hbmColor)
+                    else:
+                        LOGGER.debug("GetIconInfo failed for hCursor=%s, using fallback arrow", ck)
+                except Exception:
+                    LOGGER.debug("Cursor bitmap extraction failed, using fallback arrow", exc_info=True)
+
+                if cursor_img is None:
+                    dpi = screenshot_width / (monitor["width"] if monitor else logical_width)
+                    cursor_img = _make_arrow_cursor(scale=max(1, dpi))
+                    hx, hy = 0, 0
+                _cursor_cache[ck] = (cursor_img, hx, hy)
+
             cursor_img, hx, hy = _cursor_cache[ck]
             if monitor:
                 dpi = screenshot_width / monitor["width"]
@@ -607,6 +640,7 @@ elif IS_WINDOWS:
                 py = int(ci.ptScreenPos.y * dpi - hy)
             return cursor_img, px, py
         except Exception:
+            LOGGER.exception("get_cursor_info failed")
             return None
 
 else:  # Linux

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import textwrap
 from io import BytesIO
 from pathlib import Path
 
@@ -28,7 +29,7 @@ import mss
 import pyautogui
 from flask import Flask, jsonify, render_template, request, send_file
 from flask_socketio import SocketIO
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from werkzeug.utils import secure_filename
 
 try:
@@ -65,6 +66,8 @@ LOGGER = logging.getLogger(__name__)
 if IS_WINDOWS:
     CF_UNICODETEXT = 13
     GMEM_MOVEABLE = 0x0002
+    UOI_NAME = 2
+    DESKTOP_READOBJECTS = 0x0001
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _user32.OpenClipboard.argtypes = [wintypes.HWND]
@@ -77,6 +80,18 @@ if IS_WINDOWS:
     _user32.GetClipboardData.restype = ctypes.c_void_p
     _user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
     _user32.SetClipboardData.restype = ctypes.c_void_p
+    _user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _user32.OpenInputDesktop.restype = wintypes.HANDLE
+    _user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+    _user32.CloseDesktop.restype = wintypes.BOOL
+    _user32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _user32.GetUserObjectInformationW.restype = wintypes.BOOL
     _kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
     _kernel32.GlobalAlloc.restype = ctypes.c_void_p
     _kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
@@ -784,6 +799,142 @@ def human_size(num_bytes):
     return f"{num_bytes:.1f} TB"
 
 
+_status_frame_cache = {}
+
+
+def _render_status_frame(size, title, message, accent=(210, 153, 34)):
+    """Render a simple placeholder frame for capture states that cannot be streamed."""
+    cache_key = (size, title, message, accent)
+    if cache_key in _status_frame_cache:
+        return _status_frame_cache[cache_key].copy()
+
+    width, height = size
+    img = Image.new("RGB", (width, height), (13, 17, 23))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    margin = max(24, min(width, height) // 18)
+    panel = (margin, margin, width - margin, height - margin)
+    draw.rounded_rectangle(panel, radius=18, fill=(22, 27, 34), outline=(48, 54, 61), width=2)
+
+    badge_h = 36
+    badge = (panel[0] + 24, panel[1] + 24, panel[0] + 180, panel[1] + 24 + badge_h)
+    draw.rounded_rectangle(badge, radius=10, fill=accent)
+    draw.text((badge[0] + 14, badge[1] + 11), "Windows notice", fill=(0, 0, 0), font=font)
+
+    title_y = badge[3] + 18
+    draw.text((panel[0] + 24, title_y), title, fill=(230, 237, 243), font=font)
+
+    approx_chars = max(32, min(100, (panel[2] - panel[0] - 48) // 7))
+    wrapped = textwrap.fill(message, width=approx_chars)
+    body_y = title_y + 28
+    draw.multiline_text(
+        (panel[0] + 24, body_y),
+        wrapped,
+        fill=(139, 148, 158),
+        font=font,
+        spacing=8,
+    )
+
+    _status_frame_cache[cache_key] = img
+    return img.copy()
+
+
+def _get_selected_monitor(sct):
+    mon_idx = settings.get("monitor", 1)
+    if mon_idx < 0 or mon_idx >= len(sct.monitors):
+        mon_idx = 1
+    return sct.monitors[mon_idx]
+
+
+if IS_WINDOWS:
+
+    def _get_input_desktop_state():
+        desk = _user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS)
+        if not desk:
+            return None, ctypes.get_last_error()
+
+        needed = wintypes.DWORD(0)
+        try:
+            _user32.GetUserObjectInformationW(desk, UOI_NAME, None, 0, ctypes.byref(needed))
+            if not needed.value:
+                return None, ctypes.get_last_error()
+            buf = ctypes.create_unicode_buffer(max(1, needed.value // ctypes.sizeof(ctypes.c_wchar)))
+            if not _user32.GetUserObjectInformationW(
+                desk, UOI_NAME, buf, needed.value, ctypes.byref(needed),
+            ):
+                return None, ctypes.get_last_error()
+            return buf.value, 0
+        finally:
+            _user32.CloseDesktop(desk)
+
+
+    def _get_windows_capture_notice():
+        desktop_name, desktop_error = _get_input_desktop_state()
+        if desktop_name and desktop_name.lower() == "default":
+            return None
+        if not desktop_name and not desktop_error:
+            return None
+
+        if desktop_name:
+            detail = (
+                "Windows moved the session to the secure desktop "
+                f"({desktop_name}). UAC and credential prompts are isolated there, "
+                "so this server cannot capture the username/password dialog from the normal desktop."
+            )
+        elif desktop_error == 5:
+            detail = (
+                "Windows denied access to the current input desktop while an elevation prompt is active. "
+                "That usually means the UAC dialog is on the secure desktop, so this server cannot capture "
+                "the username/password prompt."
+            )
+        else:
+            detail = (
+                "Windows switched away from the normal input desktop while an elevation prompt is active. "
+                "This server cannot capture the administrator credential dialog in that state."
+            )
+        return {
+            "title": "UAC prompt is on the secure desktop",
+            "message": detail,
+        }
+
+else:
+
+    def _get_windows_capture_notice():
+        return None
+
+
+def _capture_monitor_frame(sct):
+    """Capture the selected monitor, or a placeholder if capture is blocked."""
+    monitor = _get_selected_monitor(sct)
+
+    notice = _get_windows_capture_notice()
+    if notice:
+        frame = _render_status_frame(
+            (monitor["width"], monitor["height"]),
+            notice["title"],
+            notice["message"],
+        )
+        return frame, frame.tobytes(), None
+
+    img = sct.grab(monitor)
+    raw = img.rgb
+    pil_img = Image.frombytes("RGB", img.size, raw)
+    scr_w = img.size[0]
+    cur_pos = None
+
+    try:
+        cursor_data = get_cursor_info(scr_w, monitor)
+        if cursor_data:
+            cur_img, px, py = cursor_data
+            cur_pos = (px, py)
+            pil_img.paste(cur_img, (px, py), cur_img)
+    except Exception:
+        pass
+
+    return pil_img, raw, cur_pos
+
+
 # ---------------------------------------------------------------------------
 # WebRTC — ScreenShareTrack + event loop + peer connection management
 # ---------------------------------------------------------------------------
@@ -806,42 +957,11 @@ if HAS_WEBRTC:
         def _capture_frame(self):
             if not hasattr(_capture_local, "sct"):
                 _capture_local.sct = mss.mss()
-            sct = _capture_local.sct
-            mon_idx = settings.get("monitor", 1)
-            if mon_idx < 0 or mon_idx >= len(sct.monitors):
-                mon_idx = 1
-            monitor = sct.monitors[mon_idx]
-            img = sct.grab(monitor)
-            scr_w = img.size[0]
-
-            frame_np = np.frombuffer(img.rgb, dtype=np.uint8).reshape(
-                img.height, img.width, 3,
-            ).copy()
-
-            try:
-                cursor_data = get_cursor_info(scr_w, monitor)
-                if cursor_data:
-                    cur_img, px, py = cursor_data
-                    cur_np = np.array(cur_img)
-                    ch, cw = cur_np.shape[:2]
-                    y1 = max(0, py)
-                    y2 = min(img.height, py + ch)
-                    x1 = max(0, px)
-                    x2 = min(img.width, px + cw)
-                    cy1, cx1 = y1 - py, x1 - px
-                    cy2, cx2 = cy1 + (y2 - y1), cx1 + (x2 - x1)
-                    if y2 > y1 and x2 > x1:
-                        alpha = cur_np[cy1:cy2, cx1:cx2, 3:4].astype(np.float32) / 255.0
-                        frame_np[y1:y2, x1:x2] = (
-                            frame_np[y1:y2, x1:x2].astype(np.float32) * (1 - alpha)
-                            + cur_np[cy1:cy2, cx1:cx2, :3].astype(np.float32) * alpha
-                        ).astype(np.uint8)
-            except Exception:
-                pass
+            pil_img, _raw, _cur_pos = _capture_monitor_frame(_capture_local.sct)
+            frame_np = np.array(pil_img)
 
             scale = settings.get("scale", 1.0)
             if abs(scale - 1.0) > 0.01:
-                pil_img = Image.fromarray(frame_np)
                 new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
                 pil_img = pil_img.resize(new_size, Image.BILINEAR)
                 frame_np = np.array(pil_img)
@@ -892,23 +1012,7 @@ def capture_and_stream():
                 continue
 
             try:
-                mon_idx = settings.get("monitor", 1)
-                if mon_idx < 0 or mon_idx >= len(sct.monitors):
-                    mon_idx = 1
-                monitor = sct.monitors[mon_idx]
-                img = sct.grab(monitor)
-                raw = img.rgb
-                scr_w = img.size[0]
-
-                # Get cursor position early for change detection
-                cursor_data = None
-                cur_pos = None
-                try:
-                    cursor_data = get_cursor_info(scr_w, monitor)
-                    if cursor_data:
-                        cur_pos = (cursor_data[1], cursor_data[2])
-                except Exception:
-                    pass
+                pil_img, raw, cur_pos = _capture_monitor_frame(sct)
 
                 # Skip unchanged frames only when screen AND cursor are static
                 buf_len = len(raw)
@@ -930,16 +1034,6 @@ def capture_and_stream():
                     continue
                 prev_sample = sample
                 prev_cur_pos = cur_pos
-
-                pil_img = Image.frombytes("RGB", img.size, raw)
-
-                # Composite cursor onto the screenshot
-                if cursor_data:
-                    try:
-                        cur_img, px, py = cursor_data
-                        pil_img.paste(cur_img, (px, py), cur_img)
-                    except Exception:
-                        pass
 
                 scale = settings["scale"]
                 if abs(scale - 1.0) > 0.01:

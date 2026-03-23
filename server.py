@@ -56,6 +56,21 @@ if IS_MACOS:
     import Quartz
 elif IS_WINDOWS:
     from ctypes import wintypes
+    # Must be called before ANY Win32 coordinate API (pyautogui.size, mss,
+    # GetCursorInfo, etc.) so that logical/physical pixel values are consistent
+    # across all calls.  Without this, display scaling (125 %, 150 %, …) causes
+    # mss screenshots vs GetCursorInfo coordinates to disagree, and the
+    # composited cursor appears at wrong position or is off-screen entirely.
+    try:
+        _shcore = ctypes.WinDLL("shcore", use_last_error=True)
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        _shcore.SetProcessDpiAwareness(2)
+    except (OSError, AttributeError):
+        # shcore unavailable (Windows 7) → fall back to user32
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (OSError, AttributeError):
+            pass
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
@@ -261,6 +276,8 @@ KEY_MAP = {
     "PageUp": "pageup",
     "PageDown": "pagedown",
     " ": "space",
+    "space": "space",
+    "Space": "space",
     "CapsLock": "capslock",
     "F1": "f1", "F2": "f2", "F3": "f3", "F4": "f4",
     "F5": "f5", "F6": "f6", "F7": "f7", "F8": "f8",
@@ -561,6 +578,40 @@ elif IS_WINDOWS:
     _cur_u32 = ctypes.windll.user32
     _cur_g32 = ctypes.windll.gdi32
 
+    # On 64-bit Windows, GDI/user32 handles are 64-bit pointers.  Without
+    # explicit argtypes, ctypes defaults to c_int (32-bit) which overflows
+    # when the handle value exceeds 2^31.
+    _cur_g32.DeleteObject.argtypes = [ctypes.c_void_p]
+    _cur_g32.DeleteObject.restype = ctypes.c_int
+    _cur_g32.DeleteDC.argtypes = [ctypes.c_void_p]
+    _cur_g32.DeleteDC.restype = ctypes.c_int
+    _cur_g32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    _cur_g32.CreateCompatibleDC.restype = ctypes.c_void_p
+    _cur_g32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _cur_g32.SelectObject.restype = ctypes.c_void_p
+    _cur_g32.CreateDIBSection.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint,
+    ]
+    _cur_g32.CreateDIBSection.restype = ctypes.c_void_p
+    _cur_u32.GetDC.argtypes = [ctypes.c_void_p]
+    _cur_u32.GetDC.restype = ctypes.c_void_p
+    _cur_u32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _cur_u32.ReleaseDC.restype = ctypes.c_int
+    _cur_u32.DrawIconEx.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint,
+    ]
+    _cur_u32.DrawIconEx.restype = ctypes.c_int
+    _cur_u32.GetIconInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _cur_u32.GetIconInfo.restype = ctypes.c_int
+    _cur_u32.GetCursorInfo.argtypes = [ctypes.c_void_p]
+    _cur_u32.GetCursorInfo.restype = ctypes.c_int
+    _cur_u32.GetCursorPos.argtypes = [ctypes.c_void_p]
+    _cur_u32.GetCursorPos.restype = ctypes.c_int
+    _cur_u32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    _cur_u32.GetSystemMetrics.restype = ctypes.c_int
+
     def _render_win_cursor(h_cursor, cw, ch):
         hdc_s = _cur_u32.GetDC(0)
         hdc_m = _cur_g32.CreateCompatibleDC(hdc_s)
@@ -586,40 +637,79 @@ elif IS_WINDOWS:
         _cur_u32.ReleaseDC(0, hdc_s)
         return Image.frombuffer("RGBA", (cw, ch), bytes(raw), "raw", "BGRA", 0, 1)
 
+    _win_cursor_bitmap_warned = False
+
+    def _get_win_cursor_pos():
+        """Return (x, y) in screen pixels via GetCursorPos — almost never fails."""
+        pt = _POINT_CI()
+        if _cur_u32.GetCursorPos(ctypes.byref(pt)):
+            return pt.x, pt.y
+        return None
+
+    def _try_native_cursor_bitmap():
+        """Try GetCursorInfo → GetIconInfo → DrawIconEx.  Returns (img, hx, hy) or None."""
+        ci = _CURSORINFO()
+        ci.cbSize = ctypes.sizeof(_CURSORINFO)
+        if not _cur_u32.GetCursorInfo(ctypes.byref(ci)):
+            return None
+        ck = ci.hCursor
+        if not ck:
+            return None
+        if ck in _cursor_cache:
+            return _cursor_cache[ck]
+        ii = _ICONINFO()
+        if not _cur_u32.GetIconInfo(ck, ctypes.byref(ii)):
+            return None
+        hx, hy = ii.xHotspot, ii.yHotspot
+        cw = _cur_u32.GetSystemMetrics(13) or 32
+        ch = _cur_u32.GetSystemMetrics(14) or 32
+        img = _render_win_cursor(ck, cw, ch)
+        if ii.hbmMask:
+            _cur_g32.DeleteObject(ii.hbmMask)
+        if ii.hbmColor:
+            _cur_g32.DeleteObject(ii.hbmColor)
+        if img is None:
+            return None
+        _cursor_cache[ck] = (img, hx, hy)
+        return img, hx, hy
+
     def get_cursor_info(screenshot_width, monitor=None):
+        global _win_cursor_bitmap_warned
         try:
-            ci = _CURSORINFO()
-            ci.cbSize = ctypes.sizeof(_CURSORINFO)
-            if not _cur_u32.GetCursorInfo(ctypes.byref(ci)):
+            pos = _get_win_cursor_pos()
+            if pos is None:
                 return None
-            if not (ci.flags & 1):
-                return None
-            ck = ci.hCursor
-            if ck not in _cursor_cache:
-                ii = _ICONINFO()
-                if not _cur_u32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
-                    return None
-                cw = _cur_u32.GetSystemMetrics(13) or 32
-                ch = _cur_u32.GetSystemMetrics(14) or 32
-                img = _render_win_cursor(ci.hCursor, cw, ch)
-                if ii.hbmMask:
-                    _cur_g32.DeleteObject(ii.hbmMask)
-                if ii.hbmColor:
-                    _cur_g32.DeleteObject(ii.hbmColor)
-                if img is None:
-                    return None
-                _cursor_cache[ck] = (img, ii.xHotspot, ii.yHotspot)
-            cursor_img, hx, hy = _cursor_cache[ck]
+            scr_x, scr_y = pos
+
+            # Best-effort native cursor bitmap; fall back to static arrow
+            bitmap_result = None
+            try:
+                bitmap_result = _try_native_cursor_bitmap()
+            except Exception:
+                if not _win_cursor_bitmap_warned:
+                    LOGGER.warning("Native cursor bitmap extraction failed, using fallback arrow", exc_info=True)
+                    _win_cursor_bitmap_warned = True
+
+            if bitmap_result:
+                cursor_img, hx, hy = bitmap_result
+            else:
+                dpi = screenshot_width / (monitor["width"] if monitor else logical_width)
+                cache_key = f"fallback_arrow_{dpi:.2f}"
+                if cache_key not in _cursor_cache:
+                    _cursor_cache[cache_key] = (_make_arrow_cursor(scale=max(1, dpi)), 0, 0)
+                cursor_img, hx, hy = _cursor_cache[cache_key]
+
             if monitor:
                 dpi = screenshot_width / monitor["width"]
-                px = int((ci.ptScreenPos.x - monitor["left"]) * dpi - hx)
-                py = int((ci.ptScreenPos.y - monitor["top"]) * dpi - hy)
+                px = int((scr_x - monitor["left"]) * dpi - hx)
+                py = int((scr_y - monitor["top"]) * dpi - hy)
             else:
                 dpi = screenshot_width / logical_width
-                px = int(ci.ptScreenPos.x * dpi - hx)
-                py = int(ci.ptScreenPos.y * dpi - hy)
+                px = int(scr_x * dpi - hx)
+                py = int(scr_y * dpi - hy)
             return cursor_img, px, py
         except Exception:
+            LOGGER.exception("get_cursor_info failed entirely")
             return None
 
 else:  # Linux
@@ -751,29 +841,7 @@ def set_clipboard(text):
 
 
 # ---------------------------------------------------------------------------
-# Clipboard auto-sync — polls remote clipboard and pushes changes to browser
-# ---------------------------------------------------------------------------
-
-_last_clipboard_content = ""
-
-
-def clipboard_sync_worker():
-    global _last_clipboard_content
-    while True:
-        try:
-            with clients_lock:
-                has_clients = bool(connected_clients)
-            if not has_clients:
-                time.sleep(5)
-                continue
-            current = get_clipboard() or ""
-            if current != _last_clipboard_content:
-                _last_clipboard_content = current
-                if current:
-                    socketio.emit("clipboard_changed", {"text": current})
-        except Exception:
-            pass
-        time.sleep(5)
+# Clipboard auto-sync removed — was polling every 5s causing CPU/GIL overhead
 
 
 # ---------------------------------------------------------------------------
@@ -1024,9 +1092,10 @@ def capture_and_stream():
                     + raw[-chunk:]
                 )
                 time_since_last = frame_start - last_sent
+                cursor_changed = cur_pos != prev_cur_pos
                 if (
                     sample == prev_sample
-                    and cur_pos == prev_cur_pos
+                    and not cursor_changed
                     and time_since_last < MIN_SEND_INTERVAL
                 ):
                     elapsed = time.monotonic() - frame_start
@@ -1052,12 +1121,16 @@ def capture_and_stream():
                     pil_img.save(buf, format="JPEG", quality=settings["quality"], optimize=False)
                     mime = "image/jpeg"
                 frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                socketio.emit("frame", {
+                frame_payload = {
                     "img": frame_b64,
                     "w": logical_width,
                     "h": logical_height,
                     "fmt": mime,
-                })
+                }
+                if cur_pos is not None:
+                    frame_payload["cx"] = cur_pos[0] / (scr_w or 1)
+                    frame_payload["cy"] = cur_pos[1] / (img.size[1] or 1)
+                socketio.emit("frame", frame_payload)
                 last_sent = time.monotonic()
             except Exception:
                 LOGGER.exception("Screen capture error")
@@ -1113,6 +1186,32 @@ def download_file():
     return send_file(abs_path, as_attachment=True)
 
 
+@app.route("/api/screenshot")
+def api_screenshot():
+    """Full-resolution screenshot of the active monitor as PNG."""
+    with mss.mss() as sct:
+        mon_idx = settings.get("monitor", 1)
+        if mon_idx < 0 or mon_idx >= len(sct.monitors):
+            mon_idx = 1
+        monitor = sct.monitors[mon_idx]
+        img = sct.grab(monitor)
+        pil_img = Image.frombytes("RGB", img.size, img.rgb)
+
+        try:
+            cursor_data = get_cursor_info(img.size[0], monitor)
+            if cursor_data:
+                cur_img, cx, cy = cursor_data
+                pil_img.paste(cur_img, (cx, cy), cur_img)
+        except Exception:
+            pass
+
+        buf = BytesIO()
+        pil_img.save(buf, format="PNG", optimize=False)
+        buf.seek(0)
+        ts = int(time.time())
+        return send_file(buf, mimetype="image/png", download_name=f"screenshot_{ts}.png", as_attachment=True)
+
+
 @app.route("/api/files")
 def list_files():
     path = request.args.get("path", HOME_DIR)
@@ -1164,6 +1263,7 @@ def on_connect():
             "webrtc": HAS_WEBRTC,
             "monitors": monitors,
             "active_monitor": settings["monitor"],
+            "os": "macos" if IS_MACOS else "windows" if IS_WINDOWS else "linux",
         },
         to=request.sid,
     )
@@ -1175,9 +1275,9 @@ def on_disconnect():
     sid = request.sid
     with clients_lock:
         connected_clients.discard(sid)
-    if HAS_WEBRTC and sid in _peer_connections:
-        pc = _peer_connections.pop(sid)
-        if _webrtc_loop and _webrtc_loop.is_running():
+    if HAS_WEBRTC:
+        pc = _peer_connections.pop(sid, None)
+        if pc and _webrtc_loop and _webrtc_loop.is_running():
             asyncio.run_coroutine_threadsafe(pc.close(), _webrtc_loop)
     LOGGER.info("Client disconnected: %s (total: %d)", sid, len(connected_clients))
 
@@ -1334,6 +1434,15 @@ def on_hotkey(data):
     modifiers = data.get("modifiers", [])
     key = data.get("key", "")
 
+    # On macOS, if the browser already resolved the character (e.g. "@" from Shift+2),
+    # use Quartz to type it directly — avoids double-shift bugs with pyautogui.
+    if IS_MACOS and modifiers == ["shift"] and len(key) == 1 and not key.isalpha():
+        try:
+            _type_char_quartz(key)
+            return
+        except Exception:
+            pass
+
     mapped_mods = [MOD_MAP[m] for m in modifiers if m in MOD_MAP]
 
     mapped_key = KEY_MAP.get(key)
@@ -1348,6 +1457,17 @@ def on_hotkey(data):
         LOGGER.exception("hotkey error mods=%s key=%s", modifiers, key)
 
 
+if IS_MACOS:
+    def _type_char_quartz(ch):
+        """Type a single character using Quartz CGEvents — bypasses pyautogui key mapping."""
+        ev_down = Quartz.CGEventCreateKeyboardEvent(None, 0, True)
+        Quartz.CGEventKeyboardSetUnicodeString(ev_down, len(ch), ch)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_down)
+        ev_up = Quartz.CGEventCreateKeyboardEvent(None, 0, False)
+        Quartz.CGEventKeyboardSetUnicodeString(ev_up, len(ch), ch)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev_up)
+
+
 @socketio.on("type_text")
 def on_type_text(data):
     """Type a string of text, one character at a time."""
@@ -1357,20 +1477,27 @@ def on_type_text(data):
     for ch in text:
         if ch == "\n":
             pyautogui.press("enter", _pause=False)
-            time.sleep(0.02)
+            time.sleep(0.03)
             continue
-        mapped = KEY_MAP.get(ch)
-        if mapped is None and len(ch) == 1:
-            mapped = ch.lower()
-        if mapped:
+        if IS_MACOS:
             try:
-                if ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?':
-                    pyautogui.hotkey("shift", mapped, _pause=False)
-                else:
-                    pyautogui.press(mapped, _pause=False)
+                _type_char_quartz(ch)
             except Exception:
-                pass
-        time.sleep(0.02)
+                LOGGER.debug("Quartz type_char failed for %r, falling back", ch)
+                pyautogui.press(ch.lower() if len(ch) == 1 else ch, _pause=False)
+        else:
+            mapped = KEY_MAP.get(ch)
+            if mapped is None and len(ch) == 1:
+                mapped = ch.lower()
+            if mapped:
+                try:
+                    if ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?':
+                        pyautogui.hotkey("shift", mapped, _pause=False)
+                    else:
+                        pyautogui.press(mapped, _pause=False)
+                except Exception:
+                    pass
+        time.sleep(0.03)
 
 
 # ---------------------------------------------------------------------------
@@ -1448,32 +1575,38 @@ if HAS_WEBRTC:
         sid = request.sid
 
         async def _handle_offer():
-            if sid in _peer_connections:
-                old_pc = _peer_connections.pop(sid)
-                await old_pc.close()
+            try:
+                if sid in _peer_connections:
+                    old_pc = _peer_connections.pop(sid)
+                    await old_pc.close()
 
-            pc = RTCPeerConnection()
-            _peer_connections[sid] = pc
+                pc = RTCPeerConnection()
+                _peer_connections[sid] = pc
 
-            @pc.on("connectionstatechange")
-            async def on_state_change():
-                LOGGER.info("WebRTC state [%s]: %s", sid, pc.connectionState)
-                if pc.connectionState in ("failed", "closed"):
-                    if sid in _peer_connections:
-                        _peer_connections.pop(sid)
+                @pc.on("connectionstatechange")
+                async def on_state_change():
+                    LOGGER.info("WebRTC state [%s]: %s", sid, pc.connectionState)
+                    if pc.connectionState in ("failed", "closed"):
+                        _peer_connections.pop(sid, None)
 
-            pc.addTrack(ScreenShareTrack())
+                pc.addTrack(ScreenShareTrack())
 
-            offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
-            await pc.setRemoteDescription(offer)
-            answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
+                offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+                await pc.setRemoteDescription(offer)
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
 
-            socketio.emit("webrtc_answer", {
-                "sdp": pc.localDescription.sdp,
-                "type": pc.localDescription.type,
-            }, to=sid)
+                socketio.emit("webrtc_answer", {
+                    "sdp": pc.localDescription.sdp,
+                    "type": pc.localDescription.type,
+                }, to=sid)
+            except Exception:
+                LOGGER.exception("WebRTC offer handler failed for %s", sid)
+                _peer_connections.pop(sid, None)
 
+        if not _webrtc_loop or not _webrtc_loop.is_running():
+            LOGGER.warning("WebRTC event loop not running, ignoring offer from %s", sid)
+            return
         asyncio.run_coroutine_threadsafe(_handle_offer(), _webrtc_loop)
 
     @socketio.on("webrtc_ice")
@@ -1687,9 +1820,6 @@ if __name__ == "__main__":
 
     stream_thread = threading.Thread(target=capture_and_stream, daemon=True)
     stream_thread.start()
-
-    clipboard_thread = threading.Thread(target=clipboard_sync_worker, daemon=True)
-    clipboard_thread.start()
 
     local_ip = get_local_ip()
     port = 5050

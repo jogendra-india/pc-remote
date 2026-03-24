@@ -1081,6 +1081,7 @@ def capture_and_stream():
 
             try:
                 pil_img, raw, cur_pos = _capture_monitor_frame(sct)
+                frame_w, frame_h = pil_img.size
 
                 # Skip unchanged frames only when screen AND cursor are static
                 buf_len = len(raw)
@@ -1123,13 +1124,13 @@ def capture_and_stream():
                 frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
                 frame_payload = {
                     "img": frame_b64,
-                    "w": logical_width,
-                    "h": logical_height,
+                    "w": frame_w,
+                    "h": frame_h,
                     "fmt": mime,
                 }
                 if cur_pos is not None:
-                    frame_payload["cx"] = cur_pos[0] / (scr_w or 1)
-                    frame_payload["cy"] = cur_pos[1] / (img.size[1] or 1)
+                    frame_payload["cx"] = cur_pos[0] / (frame_w or 1)
+                    frame_payload["cy"] = cur_pos[1] / (frame_h or 1)
                 socketio.emit("frame", frame_payload)
                 last_sent = time.monotonic()
             except Exception:

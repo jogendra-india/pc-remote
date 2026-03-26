@@ -73,6 +73,8 @@ server.on("upgrade", (req, socket, head) => {
         wss.handleUpgrade(req, socket, head, (ws) => {
             console.log(`[tunnel] client registered: ${clientId} from ${ip}`);
             clients[clientId] = ws;
+            ws._alive = true;
+            ws.on("pong", () => { ws._alive = true; });
 
             ws.on("message", (raw) => {
                 const str = raw.toString();
@@ -224,6 +226,24 @@ server.on("request", (req, res) => {
         }));
     });
 });
+
+// ---------------------------------------------------------------------------
+// Heartbeat — detect dead tunnel connections
+// ---------------------------------------------------------------------------
+const HEARTBEAT_MS = 30000;
+
+setInterval(() => {
+    for (const [clientId, ws] of Object.entries(clients)) {
+        if (ws._alive === false) {
+            console.log(`[tunnel] heartbeat timeout, terminating: ${clientId}`);
+            ws.terminate();
+            delete clients[clientId];
+            continue;
+        }
+        ws._alive = false;
+        ws.ping();
+    }
+}, HEARTBEAT_MS);
 
 // ---------------------------------------------------------------------------
 // Start

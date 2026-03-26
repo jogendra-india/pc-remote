@@ -146,12 +146,14 @@ async def handle_ws_close(msg):
 
 
 async def run():
+    backoff = 3
     while True:
         try:
             async with websockets.connect(
-                SERVER, ping_interval=20, ping_timeout=20, max_size=None,
+                SERVER, ping_interval=30, ping_timeout=60, close_timeout=10, max_size=None,
             ) as tunnel_ws:
                 print("Tunnel connected to", SERVER)
+                backoff = 3  # reset on successful connection
 
                 async for raw in tunnel_ws:
                     try:
@@ -170,7 +172,7 @@ async def run():
                         print(f"Error handling message: {exc}")
 
         except Exception as exc:
-            print(f"Tunnel disconnected: {exc}, reconnecting in 3s...")
+            print(f"Tunnel disconnected: {exc}, reconnecting in {backoff}s...")
             for ws_id, (local_ws, task) in list(local_ws_connections.items()):
                 try:
                     await local_ws.close()
@@ -178,7 +180,8 @@ async def run():
                     pass
                 task.cancel()
             local_ws_connections.clear()
-            await asyncio.sleep(3)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)  # exponential backoff, cap at 30s
 
 
 asyncio.run(run())

@@ -1255,7 +1255,11 @@ def list_files():
 def on_connect():
     with clients_lock:
         connected_clients.add(request.sid)
-    monitors = _get_monitor_list()
+    try:
+        monitors = _get_monitor_list()
+    except Exception:
+        LOGGER.exception("Failed to enumerate monitors on connect")
+        monitors = [{"index": 1, "label": "Screen 1", "width": logical_width, "height": logical_height, "left": 0, "top": 0}]
     socketio.emit(
         "screen_info",
         {
@@ -1278,8 +1282,12 @@ def on_disconnect():
         connected_clients.discard(sid)
     if HAS_WEBRTC:
         pc = _peer_connections.pop(sid, None)
-        if pc and _webrtc_loop and _webrtc_loop.is_running():
-            asyncio.run_coroutine_threadsafe(pc.close(), _webrtc_loop)
+        if pc:
+            try:
+                if _webrtc_loop and _webrtc_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(pc.close(), _webrtc_loop)
+            except Exception:
+                LOGGER.exception("Error closing WebRTC peer connection for %s", sid)
     LOGGER.info("Client disconnected: %s (total: %d)", sid, len(connected_clients))
 
 

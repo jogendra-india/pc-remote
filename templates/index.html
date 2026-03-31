@@ -685,6 +685,12 @@ socket.on("screen_info", (d) => {
     sel.style.display = d.monitors.length > 2 ? "" : "none";
   }
 
+  if (d.audio === false) {
+    $("btn-audio").disabled = true;
+    $("btn-audio").title = "Audio unavailable (sounddevice not installed on remote)";
+    $("btn-audio").style.opacity = "0.35";
+  }
+
   if (d.webrtc && !rtcPC) startWebRTC();
 });
 

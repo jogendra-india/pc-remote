@@ -224,12 +224,19 @@ def _mouse_xy(data):
 def _sync_active_monitor():
     """Refresh _active_monitor from the current settings['monitor']."""
     global _active_monitor
-    with mss.mss() as sct:
-        idx = settings.get("monitor", 1)
-        if idx < 0 or idx >= len(sct.monitors):
-            idx = 1
-        m = sct.monitors[idx]
-        _active_monitor = {"left": m["left"], "top": m["top"], "width": m["width"], "height": m["height"]}
+    try:
+        with mss.mss() as sct:
+            idx = settings.get("monitor", 1)
+            num = len(sct.monitors)
+            if num == 0:
+                return
+            if idx < 0 or idx >= num:
+                idx = min(1, num - 1)
+                settings["monitor"] = idx
+            m = sct.monitors[idx]
+            _active_monitor = {"left": m["left"], "top": m["top"], "width": m["width"], "height": m["height"]}
+    except Exception:
+        LOGGER.exception("Failed to sync active monitor")
 
 
 _sync_active_monitor()
@@ -910,8 +917,13 @@ def _render_status_frame(size, title, message, accent=(210, 153, 34)):
 
 def _get_selected_monitor(sct):
     mon_idx = settings.get("monitor", 1)
-    if mon_idx < 0 or mon_idx >= len(sct.monitors):
-        mon_idx = 1
+    num = len(sct.monitors)
+    if num == 0:
+        return {"top": 0, "left": 0, "width": logical_width, "height": logical_height}
+    if mon_idx < 0 or mon_idx >= num:
+        mon_idx = min(1, num - 1)
+        settings["monitor"] = mon_idx
+        LOGGER.warning("Monitor index reset to %d (available monitors: %d)", mon_idx, num)
     return sct.monitors[mon_idx]
 
 
@@ -1025,7 +1037,16 @@ if HAS_WEBRTC:
         def _capture_frame(self):
             if not hasattr(_capture_local, "sct"):
                 _capture_local.sct = mss.mss()
-            pil_img, _raw, _cur_pos = _capture_monitor_frame(_capture_local.sct)
+            try:
+                pil_img, _raw, _cur_pos = _capture_monitor_frame(_capture_local.sct)
+            except (IndexError, KeyError):
+                try:
+                    _capture_local.sct.close()
+                except Exception:
+                    pass
+                _capture_local.sct = mss.mss()
+                settings["monitor"] = min(1, len(_capture_local.sct.monitors) - 1) if _capture_local.sct.monitors else 0
+                pil_img, _raw, _cur_pos = _capture_monitor_frame(_capture_local.sct)
             frame_np = np.array(pil_img)
 
             scale = settings.get("scale", 1.0)
@@ -1067,77 +1088,95 @@ def capture_and_stream():
     prev_sample = None
     prev_cur_pos = None
     last_sent = 0.0
+    last_error_log = 0.0
     MIN_SEND_INTERVAL = 0.2  # force at least 5 fps even when idle
 
-    with mss.mss() as sct:
-        while True:
-            frame_start = time.monotonic()
+    sct = mss.mss()
+    while True:
+        frame_start = time.monotonic()
 
-            with clients_lock:
-                has_clients = bool(connected_clients)
-            if not has_clients:
-                time.sleep(0.5)
+        with clients_lock:
+            has_clients = bool(connected_clients)
+        if not has_clients:
+            time.sleep(0.5)
+            continue
+
+        try:
+            pil_img, raw, cur_pos = _capture_monitor_frame(sct)
+            frame_w, frame_h = pil_img.size
+
+            buf_len = len(raw)
+            chunk = 1024
+            sample = (
+                raw[:chunk]
+                + raw[buf_len // 3 : buf_len // 3 + chunk]
+                + raw[2 * buf_len // 3 : 2 * buf_len // 3 + chunk]
+                + raw[-chunk:]
+            )
+            time_since_last = frame_start - last_sent
+            cursor_changed = cur_pos != prev_cur_pos
+            if (
+                sample == prev_sample
+                and not cursor_changed
+                and time_since_last < MIN_SEND_INTERVAL
+            ):
+                elapsed = time.monotonic() - frame_start
+                time.sleep(max(0, (1.0 / settings["fps"]) - elapsed))
                 continue
+            prev_sample = sample
+            prev_cur_pos = cur_pos
 
+            scale = settings["scale"]
+            if abs(scale - 1.0) > 0.01:
+                new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
+                pil_img = pil_img.resize(new_size, Image.BILINEAR)
+
+            buf = BytesIO()
+            fmt = settings.get("format", "webp")
+            if fmt == "png":
+                pil_img.save(buf, format="PNG", optimize=False)
+                mime = "image/png"
+            elif fmt == "webp":
+                pil_img.save(buf, format="WEBP", quality=settings["quality"], method=0)
+                mime = "image/webp"
+            else:
+                pil_img.save(buf, format="JPEG", quality=settings["quality"], optimize=False)
+                mime = "image/jpeg"
+            frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            frame_payload = {
+                "img": frame_b64,
+                "w": frame_w,
+                "h": frame_h,
+                "fmt": mime,
+            }
+            if cur_pos is not None:
+                frame_payload["cx"] = cur_pos[0] / (frame_w or 1)
+                frame_payload["cy"] = cur_pos[1] / (frame_h or 1)
+            socketio.emit("frame", frame_payload)
+            last_sent = time.monotonic()
+        except (IndexError, KeyError):
+            # Monitor config changed — recreate mss context and reset monitor
+            now = time.monotonic()
+            if now - last_error_log > 5.0:
+                LOGGER.warning("Monitor config changed, refreshing mss context")
+                last_error_log = now
             try:
-                pil_img, raw, cur_pos = _capture_monitor_frame(sct)
-                frame_w, frame_h = pil_img.size
-
-                # Skip unchanged frames only when screen AND cursor are static
-                buf_len = len(raw)
-                chunk = 1024
-                sample = (
-                    raw[:chunk]
-                    + raw[buf_len // 3 : buf_len // 3 + chunk]
-                    + raw[2 * buf_len // 3 : 2 * buf_len // 3 + chunk]
-                    + raw[-chunk:]
-                )
-                time_since_last = frame_start - last_sent
-                cursor_changed = cur_pos != prev_cur_pos
-                if (
-                    sample == prev_sample
-                    and not cursor_changed
-                    and time_since_last < MIN_SEND_INTERVAL
-                ):
-                    elapsed = time.monotonic() - frame_start
-                    time.sleep(max(0, (1.0 / settings["fps"]) - elapsed))
-                    continue
-                prev_sample = sample
-                prev_cur_pos = cur_pos
-
-                scale = settings["scale"]
-                if abs(scale - 1.0) > 0.01:
-                    new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
-                    pil_img = pil_img.resize(new_size, Image.BILINEAR)
-
-                buf = BytesIO()
-                fmt = settings.get("format", "webp")
-                if fmt == "png":
-                    pil_img.save(buf, format="PNG", optimize=False)
-                    mime = "image/png"
-                elif fmt == "webp":
-                    pil_img.save(buf, format="WEBP", quality=settings["quality"], method=0)
-                    mime = "image/webp"
-                else:
-                    pil_img.save(buf, format="JPEG", quality=settings["quality"], optimize=False)
-                    mime = "image/jpeg"
-                frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                frame_payload = {
-                    "img": frame_b64,
-                    "w": frame_w,
-                    "h": frame_h,
-                    "fmt": mime,
-                }
-                if cur_pos is not None:
-                    frame_payload["cx"] = cur_pos[0] / (frame_w or 1)
-                    frame_payload["cy"] = cur_pos[1] / (frame_h or 1)
-                socketio.emit("frame", frame_payload)
-                last_sent = time.monotonic()
+                sct.close()
             except Exception:
+                pass
+            sct = mss.mss()
+            settings["monitor"] = min(1, len(sct.monitors) - 1) if sct.monitors else 0
+            _sync_active_monitor()
+            time.sleep(0.5)
+            continue
+        except Exception:
+            now = time.monotonic()
+            if now - last_error_log > 5.0:
                 LOGGER.exception("Screen capture error")
+                last_error_log = now
 
-            elapsed = time.monotonic() - frame_start
-            time.sleep(max(0, (1.0 / settings["fps"]) - elapsed))
+        elapsed = time.monotonic() - frame_start
+        time.sleep(max(0, (1.0 / settings["fps"]) - elapsed))
 
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +1305,7 @@ def on_connect():
             "width": logical_width,
             "height": logical_height,
             "webrtc": HAS_WEBRTC,
+            "audio": HAS_AUDIO,
             "monitors": monitors,
             "active_monitor": settings["monitor"],
             "os": "macos" if IS_MACOS else "windows" if IS_WINDOWS else "linux",
@@ -1677,7 +1717,7 @@ def _audio_stream_worker():
 def on_audio_start(data=None):
     global audio_active, audio_thread, audio_device_index
     if not HAS_AUDIO:
-        socketio.emit("audio_status", {"active": False, "error": "sounddevice not installed"}, to=request.sid)
+        socketio.emit("audio_status", {"active": False, "error": "Audio unavailable — run: pip install sounddevice"}, to=request.sid)
         return
     if data and "device" in data:
         audio_device_index = data["device"]

@@ -1805,13 +1805,29 @@ def _audio_stream_worker():
         pass
 
     def _pump_stream(kwargs, label):
+        import struct
         with sd.RawInputStream(**kwargs) as stream:
             LOGGER.info("Audio streaming started — %s, %dHz %dch", label, kwargs["samplerate"], kwargs["channels"])
+            chunk_count = 0
+            silent_count = 0
             while audio_active:
                 try:
                     raw = audio_q.get(timeout=0.5)
                 except queue.Empty:
                     continue
+                chunk_count += 1
+                # Silence detection — log every 100 chunks (~5s) whether we're getting real audio
+                if chunk_count % 100 == 1:
+                    n_samples = min(len(raw) // 2, 200)
+                    samples = struct.unpack(f"<{n_samples}h", raw[:n_samples * 2])
+                    peak = max(abs(s) for s in samples) if samples else 0
+                    if peak < 50:
+                        silent_count += 1
+                        if silent_count <= 3:
+                            LOGGER.info("Audio chunk #%d: SILENCE (peak=%d) — Stereo Mix may not be capturing", chunk_count, peak)
+                    else:
+                        silent_count = 0
+                        LOGGER.info("Audio chunk #%d: active (peak=%d)", chunk_count, peak)
                 encoded = base64.b64encode(raw).decode("ascii")
                 socketio.emit("audio_data", {
                     "pcm": encoded,

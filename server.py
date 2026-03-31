@@ -19,6 +19,7 @@ import signal
 import socket
 import subprocess
 import sys
+import queue
 import threading
 import time
 import textwrap
@@ -322,29 +323,12 @@ def _find_loopback_device():
         except Exception:
             LOGGER.exception("WASAPI loopback detection failed")
 
-    # Identify WDM-KS host API to skip — it doesn't support blocking streams
-    wdmks_api_idx = set()
-    try:
-        for i, api in enumerate(sd.query_hostapis()):
-            if "WDM-KS" in api["name"] or "WDM" in api["name"]:
-                wdmks_api_idx.add(i)
-    except Exception:
-        pass
-
     loopback_keywords = ["blackhole", "soundflower", "loopback", "monitor", "stereo mix", "what u hear"]
-    candidates = []
     for i, d in enumerate(devices):
         name_lower = d["name"].lower()
         if d["max_input_channels"] > 0 and any(kw in name_lower for kw in loopback_keywords):
-            if d["hostapi"] in wdmks_api_idx:
-                LOGGER.info("Skipping loopback device %d (%s) — WDM-KS not supported", i, d["name"])
-                continue
-            candidates.append(i)
-
-    if candidates:
-        chosen = candidates[0]
-        LOGGER.info("Loopback device found: %d (%s, hostapi=%d)", chosen, devices[chosen]["name"], devices[chosen]["hostapi"])
-        return chosen, None
+            LOGGER.info("Loopback device found: %d (%s, hostapi=%d)", i, d["name"], d["hostapi"])
+            return i, None
 
     LOGGER.warning("No loopback audio device found — will capture from default mic")
     return None, None
@@ -1769,7 +1753,7 @@ if HAS_WEBRTC:
 # ---------------------------------------------------------------------------
 
 def _audio_stream_worker():
-    """Capture system audio (loopback) and stream PCM chunks to connected clients."""
+    """Capture system audio (loopback) and stream PCM chunks via callback-based stream."""
     global audio_active
     if not HAS_AUDIO:
         return
@@ -1780,7 +1764,6 @@ def _audio_stream_worker():
     try:
         dev_info = sd.query_devices(dev) if dev is not None else sd.query_devices(kind="input")
         if extra is not None:
-            # WASAPI loopback uses an output device as input — read output channels
             channels = min(AUDIO_CHANNELS, int(dev_info["max_output_channels"]) or AUDIO_CHANNELS)
         else:
             channels = min(AUDIO_CHANNELS, int(dev_info["max_input_channels"]) or AUDIO_CHANNELS)
@@ -1789,18 +1772,27 @@ def _audio_stream_worker():
         channels = AUDIO_CHANNELS
         rate = AUDIO_SAMPLE_RATE
 
+    audio_q = queue.Queue(maxsize=50)
+
+    def _audio_callback(indata, frames, time_info, status):
+        try:
+            audio_q.put_nowait(bytes(indata))
+        except queue.Full:
+            pass
+
     stream_kwargs = {
         "samplerate": rate,
         "channels": channels,
         "dtype": "int16",
         "blocksize": AUDIO_CHUNK,
         "device": dev,
+        "callback": _audio_callback,
     }
     if extra is not None:
         stream_kwargs["extra_settings"] = extra
 
+    dev_name = "default"
     try:
-        dev_name = "default"
         if dev is not None:
             dev_info_log = sd.query_devices(dev)
             dev_name = dev_info_log["name"]
@@ -1812,12 +1804,14 @@ def _audio_stream_worker():
     except Exception:
         pass
 
-    def _run_stream(kwargs, label):
+    def _pump_stream(kwargs, label):
         with sd.RawInputStream(**kwargs) as stream:
             LOGGER.info("Audio streaming started — %s, %dHz %dch", label, kwargs["samplerate"], kwargs["channels"])
             while audio_active:
-                data, _ = stream.read(AUDIO_CHUNK)
-                raw = bytes(data)
+                try:
+                    raw = audio_q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
                 encoded = base64.b64encode(raw).decode("ascii")
                 socketio.emit("audio_data", {
                     "pcm": encoded,
@@ -1827,7 +1821,7 @@ def _audio_stream_worker():
 
     try:
         mode = "WASAPI loopback" if extra is not None else "direct"
-        _run_stream(stream_kwargs, f"{dev_name} ({mode})")
+        _pump_stream(stream_kwargs, f"{dev_name} ({mode})")
     except Exception:
         LOGGER.exception("Audio stream failed for device %s, trying default input", dev_name)
         if dev is not None:
@@ -1838,8 +1832,9 @@ def _audio_stream_worker():
                     "dtype": "int16",
                     "blocksize": AUDIO_CHUNK,
                     "device": None,
+                    "callback": _audio_callback,
                 }
-                _run_stream(fallback_kwargs, "default mic (fallback)")
+                _pump_stream(fallback_kwargs, "default mic (fallback)")
             except Exception:
                 LOGGER.exception("Fallback audio stream also failed")
     finally:

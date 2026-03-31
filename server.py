@@ -282,12 +282,25 @@ def _find_loopback_device():
     if IS_WINDOWS:
         try:
             wasapi_settings = sd.WasapiSettings(loopback=True)
+            wasapi_api_idx = None
             for i, api in enumerate(sd.query_hostapis()):
                 if "WASAPI" in api["name"]:
-                    out_dev = api["default_output_device"]
-                    if out_dev >= 0:
-                        LOGGER.info("WASAPI loopback: using output device %d (%s)", out_dev, devices[out_dev]["name"])
-                        return out_dev, wasapi_settings
+                    wasapi_api_idx = i
+                    break
+
+            if wasapi_api_idx is not None:
+                # Find default WASAPI output device by matching hostapi index
+                default_out = None
+                for i, d in enumerate(devices):
+                    if d["hostapi"] == wasapi_api_idx and d["max_output_channels"] > 0:
+                        if default_out is None or d.get("is_default", False):
+                            default_out = i
+                if default_out is not None:
+                    LOGGER.info(
+                        "WASAPI loopback: device %d (%s, hostapi=%d)",
+                        default_out, devices[default_out]["name"], wasapi_api_idx,
+                    )
+                    return default_out, wasapi_settings
         except Exception:
             LOGGER.debug("WASAPI loopback not available, falling back to device scan")
 
@@ -1731,7 +1744,11 @@ def _audio_stream_worker():
 
     try:
         dev_info = sd.query_devices(dev) if dev is not None else sd.query_devices(kind="input")
-        channels = min(AUDIO_CHANNELS, int(dev_info["max_input_channels"])) if extra is None else AUDIO_CHANNELS
+        if extra is not None:
+            # WASAPI loopback uses an output device as input — read output channels
+            channels = min(AUDIO_CHANNELS, int(dev_info["max_output_channels"]) or AUDIO_CHANNELS)
+        else:
+            channels = min(AUDIO_CHANNELS, int(dev_info["max_input_channels"]) or AUDIO_CHANNELS)
         rate = int(dev_info["default_samplerate"]) if dev is not None else AUDIO_SAMPLE_RATE
     except Exception:
         channels = AUDIO_CHANNELS
@@ -1806,20 +1823,24 @@ def list_audio_devices():
 
         if IS_WINDOWS:
             try:
+                wasapi_api_idx = None
                 for i, api in enumerate(sd.query_hostapis()):
-                    if "WASAPI" in api["name"] and api["default_output_device"] >= 0:
-                        out_dev = api["default_output_device"]
-                        d = devices[out_dev]
-                        result.append({
-                            "index": out_dev,
-                            "name": d["name"] + " (System Audio)",
-                            "channels": max(d["max_output_channels"], 2),
-                            "sample_rate": int(d["default_samplerate"]),
-                            "is_loopback": True,
-                            "recommended": True,
-                        })
-                        has_wasapi_loopback = True
+                    if "WASAPI" in api["name"]:
+                        wasapi_api_idx = i
                         break
+                if wasapi_api_idx is not None:
+                    for i, d in enumerate(devices):
+                        if d["hostapi"] == wasapi_api_idx and d["max_output_channels"] > 0:
+                            result.append({
+                                "index": i,
+                                "name": d["name"] + " (System Audio — WASAPI Loopback)",
+                                "channels": max(d["max_output_channels"], 2),
+                                "sample_rate": int(d["default_samplerate"]),
+                                "is_loopback": True,
+                                "recommended": not has_wasapi_loopback,
+                            })
+                            has_wasapi_loopback = True
+                            break
             except Exception:
                 pass
 

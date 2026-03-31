@@ -322,12 +322,29 @@ def _find_loopback_device():
         except Exception:
             LOGGER.exception("WASAPI loopback detection failed")
 
+    # Identify WDM-KS host API to skip — it doesn't support blocking streams
+    wdmks_api_idx = set()
+    try:
+        for i, api in enumerate(sd.query_hostapis()):
+            if "WDM-KS" in api["name"] or "WDM" in api["name"]:
+                wdmks_api_idx.add(i)
+    except Exception:
+        pass
+
     loopback_keywords = ["blackhole", "soundflower", "loopback", "monitor", "stereo mix", "what u hear"]
+    candidates = []
     for i, d in enumerate(devices):
         name_lower = d["name"].lower()
         if d["max_input_channels"] > 0 and any(kw in name_lower for kw in loopback_keywords):
-            LOGGER.info("Loopback device found: %d (%s)", i, d["name"])
-            return i, None
+            if d["hostapi"] in wdmks_api_idx:
+                LOGGER.info("Skipping loopback device %d (%s) — WDM-KS not supported", i, d["name"])
+                continue
+            candidates.append(i)
+
+    if candidates:
+        chosen = candidates[0]
+        LOGGER.info("Loopback device found: %d (%s, hostapi=%d)", chosen, devices[chosen]["name"], devices[chosen]["hostapi"])
+        return chosen, None
 
     LOGGER.warning("No loopback audio device found — will capture from default mic")
     return None, None
@@ -1795,21 +1812,36 @@ def _audio_stream_worker():
     except Exception:
         pass
 
-    try:
-        with sd.RawInputStream(**stream_kwargs) as stream:
-            mode = "WASAPI loopback" if extra is not None else "direct"
-            LOGGER.info("Audio streaming started — device: %s (%s), %dHz %dch", dev_name, mode, rate, channels)
+    def _run_stream(kwargs, label):
+        with sd.RawInputStream(**kwargs) as stream:
+            LOGGER.info("Audio streaming started — %s, %dHz %dch", label, kwargs["samplerate"], kwargs["channels"])
             while audio_active:
                 data, _ = stream.read(AUDIO_CHUNK)
                 raw = bytes(data)
                 encoded = base64.b64encode(raw).decode("ascii")
                 socketio.emit("audio_data", {
                     "pcm": encoded,
-                    "rate": rate,
-                    "channels": channels,
+                    "rate": kwargs["samplerate"],
+                    "channels": kwargs["channels"],
                 })
+
+    try:
+        mode = "WASAPI loopback" if extra is not None else "direct"
+        _run_stream(stream_kwargs, f"{dev_name} ({mode})")
     except Exception:
-        LOGGER.exception("Audio streaming error")
+        LOGGER.exception("Audio stream failed for device %s, trying default input", dev_name)
+        if dev is not None:
+            try:
+                fallback_kwargs = {
+                    "samplerate": AUDIO_SAMPLE_RATE,
+                    "channels": 1,
+                    "dtype": "int16",
+                    "blocksize": AUDIO_CHUNK,
+                    "device": None,
+                }
+                _run_stream(fallback_kwargs, "default mic (fallback)")
+            except Exception:
+                LOGGER.exception("Fallback audio stream also failed")
     finally:
         audio_active = False
         LOGGER.info("Audio streaming stopped")

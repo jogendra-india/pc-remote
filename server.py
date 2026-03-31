@@ -279,6 +279,19 @@ def _find_loopback_device():
     except Exception:
         return None, None
 
+    # Log all host APIs and devices for diagnostics
+    try:
+        apis = sd.query_hostapis()
+        for i, api in enumerate(apis):
+            LOGGER.info("Host API %d: %s (devices: %d)", i, api["name"], api["device_count"])
+        for i, d in enumerate(devices):
+            LOGGER.info(
+                "  Device %d: %s [hostapi=%d, in=%d, out=%d, rate=%.0f]",
+                i, d["name"], d["hostapi"], d["max_input_channels"], d["max_output_channels"], d["default_samplerate"],
+            )
+    except Exception:
+        pass
+
     if IS_WINDOWS:
         try:
             wasapi_settings = sd.WasapiSettings(loopback=True)
@@ -289,20 +302,25 @@ def _find_loopback_device():
                     break
 
             if wasapi_api_idx is not None:
-                # Find default WASAPI output device by matching hostapi index
                 default_out = None
                 for i, d in enumerate(devices):
                     if d["hostapi"] == wasapi_api_idx and d["max_output_channels"] > 0:
-                        if default_out is None or d.get("is_default", False):
-                            default_out = i
+                        default_out = i
+                        break
                 if default_out is not None:
                     LOGGER.info(
-                        "WASAPI loopback: device %d (%s, hostapi=%d)",
+                        "WASAPI loopback selected: device %d (%s, hostapi=%d)",
                         default_out, devices[default_out]["name"], wasapi_api_idx,
                     )
                     return default_out, wasapi_settings
+                else:
+                    LOGGER.warning("WASAPI host API found but no output devices in it")
+            else:
+                LOGGER.warning("No WASAPI host API found on this system")
+        except AttributeError:
+            LOGGER.warning("sd.WasapiSettings not available in this sounddevice build")
         except Exception:
-            LOGGER.debug("WASAPI loopback not available, falling back to device scan")
+            LOGGER.exception("WASAPI loopback detection failed")
 
     loopback_keywords = ["blackhole", "soundflower", "loopback", "monitor", "stereo mix", "what u hear"]
     for i, d in enumerate(devices):
@@ -1765,8 +1783,20 @@ def _audio_stream_worker():
         stream_kwargs["extra_settings"] = extra
 
     try:
+        dev_name = "default"
+        if dev is not None:
+            dev_info_log = sd.query_devices(dev)
+            dev_name = dev_info_log["name"]
+            LOGGER.info(
+                "Opening audio stream: device=%d (%s), hostapi=%d, in_ch=%d, out_ch=%d, rate=%d, channels=%d, wasapi=%s",
+                dev, dev_name, dev_info_log["hostapi"], dev_info_log["max_input_channels"],
+                dev_info_log["max_output_channels"], rate, channels, extra is not None,
+            )
+    except Exception:
+        pass
+
+    try:
         with sd.RawInputStream(**stream_kwargs) as stream:
-            dev_name = sd.query_devices(dev)["name"] if dev is not None else "default"
             mode = "WASAPI loopback" if extra is not None else "direct"
             LOGGER.info("Audio streaming started — device: %s (%s), %dHz %dch", dev_name, mode, rate, channels)
             while audio_active:

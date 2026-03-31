@@ -1598,10 +1598,11 @@ $("kb-input").addEventListener("blur", () => {
 
 // ===== Audio =====
 let audioBuffer = new Float32Array(0);
+let audioRate = 44100, audioChannels = 1;
 
-function initAudioPlayback() {
+function initAudioPlayback(rate) {
   if (audioCtx) return;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: rate || 44100 });
   const BUFSIZE = 4096;
   audioProcessor = audioCtx.createScriptProcessor(BUFSIZE, 1, 1);
   audioProcessor.onaudioprocess = (ev) => {
@@ -1625,22 +1626,42 @@ function initAudioPlayback() {
 socket.on("audio_data", (d) => {
   if (!audioActive) return;
   try {
+    if (d.rate && d.rate !== audioRate) {
+      audioRate = d.rate;
+      if (audioCtx) { audioProcessor.disconnect(); audioCtx.close(); audioCtx = null; audioProcessor = null; }
+      initAudioPlayback(audioRate);
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    }
+    audioChannels = d.channels || 1;
+
     const raw = atob(d.pcm);
     const int16 = new Int16Array(raw.length / 2);
     for (let i = 0; i < int16.length; i++) {
       int16[i] = raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8);
     }
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-    
-    const newBuffer = new Float32Array(audioBuffer.length + float32.length);
+
+    let mono;
+    if (audioChannels >= 2) {
+      const samplesPerCh = int16.length / audioChannels;
+      mono = new Float32Array(samplesPerCh);
+      for (let i = 0; i < samplesPerCh; i++) {
+        let sum = 0;
+        for (let c = 0; c < audioChannels; c++) sum += int16[i * audioChannels + c];
+        mono[i] = (sum / audioChannels) / 32768;
+      }
+    } else {
+      mono = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) mono[i] = int16[i] / 32768;
+    }
+
+    const newBuffer = new Float32Array(audioBuffer.length + mono.length);
     newBuffer.set(audioBuffer, 0);
-    newBuffer.set(float32, audioBuffer.length);
+    newBuffer.set(mono, audioBuffer.length);
     audioBuffer = newBuffer;
 
-    // Prevent buffer bloat
-    if (audioBuffer.length > 88200) {
-      audioBuffer = audioBuffer.slice(audioBuffer.length - 88200);
+    const maxBuf = (audioRate || 44100) * 2;
+    if (audioBuffer.length > maxBuf) {
+      audioBuffer = audioBuffer.slice(audioBuffer.length - maxBuf);
     }
   } catch {}
 });
@@ -1658,7 +1679,7 @@ $("btn-audio").onclick = () => {
     if (audioCtx) { audioProcessor.disconnect(); audioCtx.close(); audioCtx = null; audioProcessor = null; }
     audioBuffer = new Float32Array(0);
   } else {
-    initAudioPlayback();
+    initAudioPlayback(audioRate);
     if (audioCtx.state === "suspended") audioCtx.resume();
     const deviceSel = $("sel-audio-device");
     const deviceIdx = deviceSel.value ? parseInt(deviceSel.value) : null;
@@ -1676,13 +1697,24 @@ function loadAudioDevices() {
       return;
     }
     $("audio-device-row").style.display = "block";
-    sel.innerHTML = '<option value="">Default</option>';
+    sel.innerHTML = '<option value="">Default (auto-detect loopback)</option>';
     data.devices.forEach(d => {
       const opt = document.createElement("option");
       opt.value = d.index;
-      opt.textContent = d.name + " (" + d.channels + "ch, " + d.sample_rate + "Hz)";
+      const label = d.name + " (" + d.channels + "ch, " + d.sample_rate + "Hz)";
+      opt.textContent = d.recommended ? "★ " + label : label;
+      if (d.is_loopback) opt.style.fontWeight = "bold";
       sel.appendChild(opt);
     });
+    if (data.recommended !== null && data.recommended !== undefined) {
+      sel.value = String(data.recommended);
+    }
+    if (data.hint) {
+      const hintOpt = document.createElement("option");
+      hintOpt.disabled = true;
+      hintOpt.textContent = "ℹ️ " + data.hint;
+      sel.appendChild(hintOpt);
+    }
   }).catch(() => {});
 }
 

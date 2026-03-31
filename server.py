@@ -263,9 +263,46 @@ audio_active = False
 audio_thread = None
 audio_lock = threading.Lock()
 AUDIO_SAMPLE_RATE = 44100
-AUDIO_CHANNELS = 1
+AUDIO_CHANNELS = 2
 AUDIO_CHUNK = 4096
 audio_device_index = None
+audio_loopback_extra = None  # WASAPI loopback settings (Windows only)
+
+
+def _find_loopback_device():
+    """Auto-detect the best device for capturing system audio output."""
+    if not HAS_AUDIO:
+        return None, None
+
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return None, None
+
+    if IS_WINDOWS:
+        try:
+            wasapi_settings = sd.WasapiSettings(loopback=True)
+            for i, api in enumerate(sd.query_hostapis()):
+                if "WASAPI" in api["name"]:
+                    out_dev = api["default_output_device"]
+                    if out_dev >= 0:
+                        LOGGER.info("WASAPI loopback: using output device %d (%s)", out_dev, devices[out_dev]["name"])
+                        return out_dev, wasapi_settings
+        except Exception:
+            LOGGER.debug("WASAPI loopback not available, falling back to device scan")
+
+    loopback_keywords = ["blackhole", "soundflower", "loopback", "monitor", "stereo mix", "what u hear"]
+    for i, d in enumerate(devices):
+        name_lower = d["name"].lower()
+        if d["max_input_channels"] > 0 and any(kw in name_lower for kw in loopback_keywords):
+            LOGGER.info("Loopback device found: %d (%s)", i, d["name"])
+            return i, None
+
+    LOGGER.warning("No loopback audio device found — will capture from default mic")
+    return None, None
+
+
+_default_loopback_device, _default_loopback_extra = _find_loopback_device()
 
 KEY_MAP = {
     "Enter": "return",
@@ -1684,27 +1721,45 @@ if HAS_WEBRTC:
 # ---------------------------------------------------------------------------
 
 def _audio_stream_worker():
-    """Capture system audio and stream PCM chunks to all connected clients."""
+    """Capture system audio (loopback) and stream PCM chunks to connected clients."""
     global audio_active
     if not HAS_AUDIO:
         return
+
+    dev = audio_device_index if audio_device_index is not None else _default_loopback_device
+    extra = audio_loopback_extra if audio_loopback_extra is not None else _default_loopback_extra
+
     try:
-        with sd.RawInputStream(
-            samplerate=AUDIO_SAMPLE_RATE,
-            channels=AUDIO_CHANNELS,
-            dtype="int16",
-            blocksize=AUDIO_CHUNK,
-            device=audio_device_index,
-        ) as stream:
-            LOGGER.info("Audio streaming started (device=%s)", audio_device_index)
+        dev_info = sd.query_devices(dev) if dev is not None else sd.query_devices(kind="input")
+        channels = min(AUDIO_CHANNELS, int(dev_info["max_input_channels"])) if extra is None else AUDIO_CHANNELS
+        rate = int(dev_info["default_samplerate"]) if dev is not None else AUDIO_SAMPLE_RATE
+    except Exception:
+        channels = AUDIO_CHANNELS
+        rate = AUDIO_SAMPLE_RATE
+
+    stream_kwargs = {
+        "samplerate": rate,
+        "channels": channels,
+        "dtype": "int16",
+        "blocksize": AUDIO_CHUNK,
+        "device": dev,
+    }
+    if extra is not None:
+        stream_kwargs["extra_settings"] = extra
+
+    try:
+        with sd.RawInputStream(**stream_kwargs) as stream:
+            dev_name = sd.query_devices(dev)["name"] if dev is not None else "default"
+            mode = "WASAPI loopback" if extra is not None else "direct"
+            LOGGER.info("Audio streaming started — device: %s (%s), %dHz %dch", dev_name, mode, rate, channels)
             while audio_active:
                 data, _ = stream.read(AUDIO_CHUNK)
                 raw = bytes(data)
                 encoded = base64.b64encode(raw).decode("ascii")
                 socketio.emit("audio_data", {
                     "pcm": encoded,
-                    "rate": AUDIO_SAMPLE_RATE,
-                    "channels": AUDIO_CHANNELS,
+                    "rate": rate,
+                    "channels": channels,
                 })
     except Exception:
         LOGGER.exception("Audio streaming error")
@@ -1715,12 +1770,13 @@ def _audio_stream_worker():
 
 @socketio.on("audio_start")
 def on_audio_start(data=None):
-    global audio_active, audio_thread, audio_device_index
+    global audio_active, audio_thread, audio_device_index, audio_loopback_extra
     if not HAS_AUDIO:
         socketio.emit("audio_status", {"active": False, "error": "Audio unavailable — run: pip install sounddevice"}, to=request.sid)
         return
     if data and "device" in data:
         audio_device_index = data["device"]
+        audio_loopback_extra = data.get("wasapi_loopback") and _default_loopback_extra or None
     with audio_lock:
         if audio_active:
             return
@@ -1744,16 +1800,58 @@ def list_audio_devices():
         return jsonify({"available": False, "devices": [], "error": "sounddevice not installed"})
     try:
         devices = sd.query_devices()
-        input_devices = []
+        result = []
+        loopback_keywords = {"blackhole", "soundflower", "loopback", "monitor", "stereo mix", "what u hear"}
+        has_wasapi_loopback = False
+
+        if IS_WINDOWS:
+            try:
+                for i, api in enumerate(sd.query_hostapis()):
+                    if "WASAPI" in api["name"] and api["default_output_device"] >= 0:
+                        out_dev = api["default_output_device"]
+                        d = devices[out_dev]
+                        result.append({
+                            "index": out_dev,
+                            "name": d["name"] + " (System Audio)",
+                            "channels": max(d["max_output_channels"], 2),
+                            "sample_rate": int(d["default_samplerate"]),
+                            "is_loopback": True,
+                            "recommended": True,
+                        })
+                        has_wasapi_loopback = True
+                        break
+            except Exception:
+                pass
+
         for i, d in enumerate(devices):
             if d["max_input_channels"] > 0:
-                input_devices.append({
+                name_lower = d["name"].lower()
+                is_loopback = any(kw in name_lower for kw in loopback_keywords)
+                result.append({
                     "index": i,
                     "name": d["name"],
                     "channels": d["max_input_channels"],
                     "sample_rate": int(d["default_samplerate"]),
+                    "is_loopback": is_loopback,
+                    "recommended": is_loopback and not has_wasapi_loopback,
                 })
-        return jsonify({"available": True, "devices": input_devices})
+
+        recommended = _default_loopback_device
+        hint = None
+        if not any(d.get("is_loopback") or d.get("recommended") for d in result):
+            if IS_MACOS:
+                hint = "Install BlackHole (brew install blackhole-2ch) to capture system audio"
+            elif IS_WINDOWS:
+                hint = "Enable Stereo Mix in Sound settings to capture system audio"
+            else:
+                hint = "Use a PulseAudio monitor source to capture system audio"
+
+        return jsonify({
+            "available": True,
+            "devices": result,
+            "recommended": recommended,
+            "hint": hint,
+        })
     except Exception as e:
         return jsonify({"available": False, "devices": [], "error": str(e)})
 

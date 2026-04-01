@@ -4,7 +4,7 @@ import json
 import requests
 import websockets
 
-SERVER = "wss://<domain>/tunnel/register?id=xyz"
+SERVER = "wss://rndqfase.bhel.in/tunnel/register?id=plant1"
 LOCAL_PORT = 5050
 LOCAL_BASE = f"http://localhost:{LOCAL_PORT}"
 LOCAL_WS_BASE = f"ws://localhost:{LOCAL_PORT}"

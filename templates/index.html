@@ -559,7 +559,14 @@ html, body {
 
 <textarea id="kb-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" rows="1"></textarea>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+<script>
+(function() {
+  const tunnelMatch = window.location.pathname.match(/^(\/tunnel\/[^\/]+)/);
+  const base = tunnelMatch ? tunnelMatch[1] : "";
+  window.__REMOTE_BASE__ = base;
+  document.write('<script src="' + base + '/static/vendor/socket.io.min.js"><\/script>');
+})();
+</script>
 <script>
 (function() {
 "use strict";
@@ -629,8 +636,7 @@ let audioCtx = null, audioProcessor = null, audioQueue = [];
 let latencyMs = 0;
 
 // ===== Socket =====
-const tunnelMatch = window.location.pathname.match(/^(\/tunnel\/[^\/]+)/);
-const BASE = tunnelMatch ? tunnelMatch[1] : "";
+const BASE = window.__REMOTE_BASE__ || "";
 const socket = io({ path: BASE + "/socket.io/", transports: ["websocket"] });
 
 socket.on("connect", () => {

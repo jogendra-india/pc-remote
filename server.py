@@ -190,7 +190,12 @@ def resource_path(relative_path):
 HOME_DIR = str(Path.home())
 UPLOAD_DIR = os.path.join(HOME_DIR, "Desktop", "RemoteUploads")
 
-app = Flask(__name__, template_folder=resource_path("templates"))
+app = Flask(
+    __name__,
+    template_folder=resource_path("templates"),
+    static_folder=resource_path("static"),
+    static_url_path="/static",
+)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 socketio = SocketIO(
     app,

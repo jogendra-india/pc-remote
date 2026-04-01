@@ -5,7 +5,7 @@ a = Analysis(
     ['server.py'],
     pathex=[],
     binaries=[],
-    datas=[('templates', 'templates')],
+    datas=[('templates', 'templates'), ('static', 'static')],
     hiddenimports=['engineio.async_drivers.threading'],
     hookspath=[],
     hooksconfig={},

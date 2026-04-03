@@ -23,6 +23,9 @@
   --bottombar-h: 48px;
   --panel-h: 0px;
 }
+body.bb-hidden {
+  --bottombar-h: 0px;
+}
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body {
   height:100%; overflow:hidden; background:var(--bg); color:var(--text);
@@ -142,6 +145,19 @@ html, body {
 }
 #bb-text-input:focus { border-color:var(--accent); }
 #bb-text-input::placeholder { color:var(--text-dim); font-size:11px; }
+
+/* ---- Bottom bar collapse ---- */
+#bottombar { transition: transform .2s, opacity .2s; }
+body.bb-hidden #bottombar { transform: translateY(calc(100% + 12px)); opacity:0; pointer-events:none; }
+#bb-show-tab {
+  display:none; position:fixed; bottom:0; left:50%; transform:translateX(-50%);
+  background:var(--surface); border:1px solid var(--border); border-bottom:none;
+  border-radius:8px 8px 0 0; color:var(--text-dim); font-size:16px;
+  padding:2px 14px 0; cursor:pointer; z-index:101; line-height:1.6;
+  transition: color .15s;
+}
+#bb-show-tab:hover { color:var(--text); }
+body.bb-hidden #bb-show-tab { display:block; }
 
 /* ---- Bottom Panel Container ---- */
 #bottom-panel {
@@ -342,8 +358,13 @@ html, body {
   <button class="pan-btn" id="pan-down" title="Pan down">&#9660;</button>
 </div>
 
+<!-- ===== Bottom Bar Toggle (shown when bar is hidden) ===== -->
+<button id="bb-show-tab" title="Show action bar">⌨︎</button>
+
 <!-- ===== Bottom Action Bar ===== -->
 <div id="bottombar">
+  <button class="bb" id="bb-hide" title="Hide action bar" style="padding:5px 4px;min-width:22px;color:var(--text-dim);font-size:14px;">✕</button>
+  <span class="bb sep">|</span>
   <button class="bb wide" id="bb-lclick" title="Left Click">L Click</button>
   <button class="bb wide" id="bb-rclick" title="Right Click">R Click</button>
   <button class="bb wide" id="bb-dblclick" title="Double Click">Dbl</button>
@@ -1254,6 +1275,16 @@ $("bottombar").addEventListener("wheel", (e) => {
     $("bottombar").scrollLeft += e.deltaY;
   }
 }, { passive: false });
+
+// ===== Bottom Bar Toggle =====
+function setBBVisible(visible) {
+  document.body.classList.toggle("bb-hidden", !visible);
+  try { localStorage.setItem("bbHidden", visible ? "0" : "1"); } catch {}
+}
+$("bb-hide").addEventListener("click", () => setBBVisible(false));
+$("bb-show-tab").addEventListener("click", () => setBBVisible(true));
+// Restore preference
+if (localStorage.getItem("bbHidden") === "1") setBBVisible(false);
 
 // ===== Clipboard =====
 socket.on("clipboard_content", async (d) => {

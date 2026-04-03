@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import requests
@@ -11,7 +12,9 @@ def _load_config():
     parser.add_argument("--port", type=int, default=None)
     args, _ = parser.parse_known_args()
     try:
-        cfg = json.loads((Path(__file__).parent / "config.json").read_text())
+        base = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+        cfg_path = Path(sys.executable).parent / "config.json" if getattr(sys, 'frozen', False) else base / "config.json"
+        cfg = json.loads(cfg_path.read_text())
     except Exception:
         cfg = {}
     port = args.port or int(cfg.get("server_port", 5050))

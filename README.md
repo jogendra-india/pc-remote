@@ -239,24 +239,29 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-python server.py
+# Copy the example config and edit if needed (port, tunnel URL)
+cp config.example.json config.json
+
+python start.py 1
 ```
 
 Output:
 
 ```
-======================================================
-  Remote Desktop Server (macOS)
-======================================================
-  Local:   http://localhost:5050
-  Network: http://192.168.x.x:5050
-======================================================
-  Open the Network URL on your phone / tablet
-  (device must be on the same Wi-Fi network)
-======================================================
+[server] ======================================================
+[server]   Remote Desktop Server (macOS)
+[server] ======================================================
+[server]   Local:   http://localhost:5050
+[server]   Network: http://192.168.x.x:5050
+[server] ======================================================
+[server]   Open the Network URL on your phone / tablet
+[server]   (device must be on the same Wi-Fi network)
+[server] ======================================================
 ```
 
 Open the **Network URL** on your phone or another device on the same Wi-Fi.
+
+> You can also run `python server.py` directly if you don't need the launcher.
 
 ---
 
@@ -343,27 +348,38 @@ pm2 startup
 
 ### Step 4: Configure and start the host-side tunnel client
 
-Edit `create_tunnel.py` and set your server URL:
-
-```python
-SERVER = "wss://your-domain.com/tunnel/register?id=xyz"
-```
-
-Then start all host-side services:
+Copy the example config and set your tunnel server URL and port:
 
 ```bash
-# Terminal 1 — start the remote desktop server
-python server.py
+cp config.example.json config.json
+```
 
-# Terminal 2 — start the tunnel client
-python create_tunnel.py
+Edit `config.json`:
+
+```json
+{
+  "server_port": 5050,
+  "tunnel_server": "wss://your-domain.com/tunnel/register?id=xyz"
+}
+```
+
+Then start both host-side services with one command:
+
+```bash
+python start.py 2
 ```
 
 You should see:
 
 ```
-Tunnel connected to wss://your-domain.com/tunnel/register?id=xyz
+[server]  * Running on http://0.0.0.0:5050
+[tunnel] Tunnel connected to wss://your-domain.com/tunnel/register?id=xyz
 ```
+
+Press `Ctrl+C` to stop both processes.
+
+> You can also pass `--port` to override the port without editing config.json:
+> `python start.py 2 --port 8080`
 
 ### Step 5: Access from browser
 
@@ -374,9 +390,8 @@ Open `https://your-domain.com/tunnel/xyz` from any browser, anywhere.
 | Order | Command | Where |
 |---|---|---|
 | 1 | `node server.js` | GCP server |
-| 2 | `python server.py` | Host machine |
-| 3 | `python create_tunnel.py` | Host machine |
-| 4 | Open browser URL | Client device |
+| 2 | `python start.py 2` | Host machine (starts server + tunnel) |
+| 3 | Open browser URL | Client device |
 
 ### Rate limiting
 
@@ -451,6 +466,8 @@ Toggle between modes using the **Direct / Trackpad** button:
 | **Fullscreen** | Toggle fullscreen mode |
 | **Settings** | Stream settings (FPS, quality, scale, format) |
 | **-/+/Fit** | Zoom controls |
+| **✕** (bottom bar) | Hide the bottom action bar to maximize screen area |
+| **⌨︎** (bottom tab) | Restore the bottom action bar |
 
 ---
 
@@ -560,10 +577,10 @@ Sleep is re-enabled automatically when the server stops.
 | Clipboard not working (Linux) | Install `xclip`: `sudo apt install xclip` |
 | High latency via tunnel | Use JPEG format, lower FPS/quality/scale |
 | Can't connect from phone | Ensure same Wi-Fi/LAN, no firewall blocking port 5050 |
-| Port 5050 in use | `lsof -ti:5050 \| xargs kill -9` (macOS/Linux) |
+| Port 5050 in use | Change `server_port` in `config.json`, or use `python start.py 1 --port 8080` |
 | Phone clipboard read fails | Requires HTTPS or localhost. Use manual paste instead. |
 | Ctrl+C doesn't copy (tunnel to Mac) | Ctrl is auto-remapped to Cmd. This is working correctly. |
-| `create_tunnel.py` gets HTTP 502 | Ensure `SERVER` URL matches `server.js` endpoint. Check server.js is running. |
+| `create_tunnel.py` gets HTTP 502 | Ensure `tunnel_server` in `config.json` matches `server.js` endpoint. Check server.js is running. |
 | Bus error on macOS | Restart `server.py`. If persists, check Python/Quartz version compatibility. |
 | Frozen stream via tunnel | Restart `create_tunnel.py`. Check frame-drop backpressure is active. |
 
@@ -590,11 +607,14 @@ Sleep is re-enabled automatically when the server stops.
 
 ```
 macbook-remote/
-  server.py            Host remote desktop server (Flask + Socket.IO)
-  create_tunnel.py     Tunnel client (connects host to GCP relay)
-  server.js            Tunnel relay server (runs on GCP)
-  requirements.txt     Python dependencies
+  server.py              Host remote desktop server (Flask + Socket.IO)
+  create_tunnel.py       Tunnel client (connects host to GCP relay)
+  server.js              Tunnel relay server (runs on GCP)
+  start.py               Launcher — starts server and/or tunnel together
+  config.example.json    Example configuration (copy to config.json)
+  config.json            Local config — port and tunnel URL (git-ignored)
+  requirements.txt       Python dependencies
   templates/
-    index.html         Browser client UI (HTML + CSS + JS)
-  README.md            This file
+    index.html           Browser client UI (HTML + CSS + JS)
+  README.md              This file
 ```

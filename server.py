@@ -323,7 +323,7 @@ def _find_loopback_device():
                     LOGGER.warning("WASAPI host API found but no output devices in it")
             else:
                 LOGGER.warning("No WASAPI host API found on this system")
-        except AttributeError:
+        except (AttributeError, TypeError):
             LOGGER.warning("sd.WasapiSettings not available in this sounddevice build")
         except Exception:
             LOGGER.exception("WASAPI loopback detection failed")

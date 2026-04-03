@@ -2068,7 +2068,20 @@ if __name__ == "__main__":
     stream_thread.start()
 
     local_ip = get_local_ip()
-    port = 5050
+
+    # Port: CLI flag > config.json > default 5050
+    import argparse, json as _json
+    _parser = argparse.ArgumentParser(add_help=False)
+    _parser.add_argument("--port", type=int, default=None)
+    _args, _ = _parser.parse_known_args()
+    if _args.port:
+        port = _args.port
+    else:
+        try:
+            _cfg = _json.loads((Path(__file__).parent / "config.json").read_text())
+            port = int(_cfg.get("server_port", 5050))
+        except Exception:
+            port = 5050
 
     platform_name = "macOS" if IS_MACOS else "Windows" if IS_WINDOWS else "Linux"
     print(f"\n{'=' * 54}")

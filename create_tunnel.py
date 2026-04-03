@@ -1,11 +1,24 @@
+import argparse
 import asyncio
 import json
+from pathlib import Path
 
 import requests
 import websockets
 
-SERVER = "wss://rndqfase.bhel.in/tunnel/register?id=plant1"
-LOCAL_PORT = 5050
+def _load_config():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--port", type=int, default=None)
+    args, _ = parser.parse_known_args()
+    try:
+        cfg = json.loads((Path(__file__).parent / "config.json").read_text())
+    except Exception:
+        cfg = {}
+    port = args.port or int(cfg.get("server_port", 5050))
+    server = cfg.get("tunnel_server", "")
+    return port, server
+
+LOCAL_PORT, SERVER = _load_config()
 LOCAL_BASE = f"http://localhost:{LOCAL_PORT}"
 LOCAL_WS_BASE = f"ws://localhost:{LOCAL_PORT}"
 

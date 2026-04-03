@@ -185,6 +185,16 @@ server.on("request", (req, res) => {
     }
 
     const url = new URL(req.url, "http://localhost");
+
+    // Redirect /tunnel/<clientId> → /tunnel/<clientId>/ so relative asset
+    // paths (e.g. static/app.js) resolve correctly in the browser.
+    const trailingSlashMatch = url.pathname.match(/^\/tunnel\/([^/]+)$/);
+    if (trailingSlashMatch) {
+        res.writeHead(301, { Location: url.pathname + "/" + (url.search || "") });
+        res.end();
+        return;
+    }
+
     const match = url.pathname.match(/^\/tunnel\/([^/]+)(\/.*)?/);
     if (!match) {
         res.writeHead(404);

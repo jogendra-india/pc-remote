@@ -1,8 +1,10 @@
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 import requests
 import websockets
@@ -25,6 +27,11 @@ LOCAL_PORT, SERVER = _load_config()
 LOCAL_BASE = f"http://localhost:{LOCAL_PORT}"
 LOCAL_WS_BASE = f"ws://localhost:{LOCAL_PORT}"
 
+# Extract client_id from tunnel URL for <base href> injection
+_parsed_server = urlparse(SERVER)
+_client_id = parse_qs(_parsed_server.query).get("id", [""])[0]
+TUNNEL_BASE_HREF = f"/tunnel/{_client_id}/" if _client_id else ""
+
 local_ws_connections = {}
 
 
@@ -45,12 +52,18 @@ async def handle_http_request(tunnel_ws, msg):
                 "set-cookie", "x-content-type-options",
             )
         }
+        body = resp.text
+        # Inject <base href> into HTML so relative paths resolve through tunnel
+        ct = (headers.get("Content-Type") or headers.get("content-type") or "")
+        if TUNNEL_BASE_HREF and "text/html" in ct and "<head" in body:
+            base_tag = f'<base href="{TUNNEL_BASE_HREF}">'
+            body = body.replace("<head>", f"<head>\n{base_tag}", 1)
         await tunnel_ws.send(json.dumps({
             "type": "http_response",
             "id": request_id,
             "status": resp.status_code,
             "headers": headers,
-            "body": resp.text,
+            "body": body,
         }))
     except Exception as exc:
         try:

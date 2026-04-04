@@ -174,6 +174,7 @@ function renderLoop() {
 requestAnimationFrame(renderLoop);
 
 socket.on("frame", (d) => {
+  if (useWebRTC) return;  // WebRTC video element handles display; ignore Socket.IO frames
   if (framePending) return;
   framePending = true;
   screenW = d.w; screenH = d.h;
@@ -234,20 +235,10 @@ function startWebRTC() {
   rtcPC.addTransceiver("video", { direction: "recvonly" });
 
   rtcPC.ontrack = (ev) => {
-    clearTimeout(_rtcTimeout);
-    _rtcTimeout = null;
+    // Wire up the stream now so video plays the instant ICE connects.
+    // Do NOT switch display or set useWebRTC here — wait for "connected".
+    LOGGER.log("WebRTC track received — awaiting ICE");
     screenVideo.srcObject = ev.streams[0];
-    screenVideo.classList.remove("hidden");
-    canvas.classList.add("overlay");
-    useWebRTC = true;
-    LOGGER.log("WebRTC track received");
-
-    screenVideo.onloadedmetadata = () => {
-      canvas.width = screenVideo.videoWidth;
-      canvas.height = screenVideo.videoHeight;
-      recalcFit(); applyZoom();
-    };
-
     if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
       function countFrame() { frameCount++; screenVideo.requestVideoFrameCallback(countFrame); }
       screenVideo.requestVideoFrameCallback(countFrame);
@@ -270,10 +261,25 @@ function startWebRTC() {
     if (rtcPC && rtcPC.connectionState === "connected") {
       clearTimeout(_rtcTimeout);
       _rtcTimeout = null;
+      screenVideo.classList.remove("hidden");
+      canvas.classList.add("overlay");
+      useWebRTC = true;
+      LOGGER.log("WebRTC connected");
+      if (screenVideo.videoWidth) {
+        canvas.width = screenVideo.videoWidth;
+        canvas.height = screenVideo.videoHeight;
+        recalcFit(); applyZoom();
+      } else {
+        screenVideo.onloadedmetadata = () => {
+          canvas.width = screenVideo.videoWidth;
+          canvas.height = screenVideo.videoHeight;
+          recalcFit(); applyZoom();
+        };
+      }
     }
     if (rtcPC && (rtcPC.connectionState === "failed" || rtcPC.connectionState === "disconnected")) {
       _cleanupWebRTC();
-      showToast("WebRTC disconnected — falling back to Socket.IO");
+      showToast("WebRTC unavailable — using Socket.IO");
     }
   };
 

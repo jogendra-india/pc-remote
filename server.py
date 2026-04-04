@@ -1217,11 +1217,12 @@ def capture_and_stream():
             _frame_buffer.put(pil_img, raw, cur_pos)
 
             # Only encode + emit via Socket.IO for clients not yet on WebRTC
+            # Skip encoding entirely when every connected client is on WebRTC
             with clients_lock:
-                all_clients = set(connected_clients)
+                n_clients = len(connected_clients)
             with _webrtc_clients_lock:
-                socketio_clients = all_clients - _webrtc_clients
-            if socketio_clients:
+                n_webrtc = len(_webrtc_clients)
+            if n_clients > n_webrtc:
                 buf = BytesIO()
                 fmt = settings.get("format", "webp")
                 if fmt == "png":
@@ -1243,8 +1244,7 @@ def capture_and_stream():
                 if cur_pos is not None:
                     frame_payload["cx"] = cur_pos[0] / (frame_w or 1)
                     frame_payload["cy"] = cur_pos[1] / (frame_h or 1)
-                for sid in socketio_clients:
-                    socketio.emit("frame", frame_payload, to=sid)
+                socketio.emit("frame", frame_payload)
             last_sent = time.monotonic()
         except (IndexError, KeyError):
             # Monitor config changed — recreate mss context and reset monitor
@@ -1887,6 +1887,10 @@ if HAS_WEBRTC:
                 ip = parts[4]
                 port = int(parts[5])
                 candidate_type = parts[7]  # parts[6] == "typ"
+                # Skip mDNS (.local) hostnames — aiortc cannot resolve them
+                if ip.endswith(".local"):
+                    LOGGER.debug("Skipping unresolvable mDNS candidate for %s: %s", sid, ip)
+                    return
                 related_address = None
                 related_port = None
                 for i in range(8, len(parts) - 1, 2):

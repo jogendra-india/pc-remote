@@ -12,6 +12,7 @@ const toast = $("toast");
 let viewOnly = false;
 let useWebRTC = false;
 let rtcPC = null;
+let inputDC = null;
 
 // ===== localStorage helpers =====
 const STORAGE_KEY = "pc_remote_settings";
@@ -80,18 +81,18 @@ socket.on("connect", () => {
   const saved = loadSavedSettings();
   if (saved) {
     socket.emit("update_settings", {
-      fps: saved.fps || 15,
+      fps: saved.fps || 30,
       quality: saved.quality || 70,
       scale: (saved.scale || 75) / 100,
       format: saved.format || "webp",
     });
     // Restore UI
-    $("sl-fps").value = saved.fps || 15;
+    $("sl-fps").value = saved.fps || 30;
     $("sl-q").value = saved.quality || 70;
     $("sl-s").value = saved.scale || 75;
     $("sel-fmt").value = saved.format || "webp";
     if (saved.sens) { cursorSens = saved.sens; $("sl-sens").value = saved.sens * 10; $("val-sens").textContent = saved.sens.toFixed(1); }
-    $("val-fps").textContent = saved.fps || 15;
+    $("val-fps").textContent = saved.fps || 30;
     $("val-q").textContent = saved.quality || 70;
     $("val-s").textContent = ((saved.scale || 75) / 100).toFixed(2);
   }
@@ -200,6 +201,7 @@ let _rtcTimeout = null;
 function _cleanupWebRTC() {
   clearTimeout(_rtcTimeout);
   _rtcTimeout = null;
+  if (inputDC) { try { inputDC.close(); } catch {} inputDC = null; }
   if (rtcPC) {
     rtcPC.onconnectionstatechange = null;
     rtcPC.ontrack = null;
@@ -225,6 +227,9 @@ function startWebRTC() {
       showToast("WebRTC timed out — using Socket.IO");
     }
   }, WEBRTC_CONNECT_TIMEOUT_MS);
+
+  // Input DataChannel: unordered + no retransmits = UDP semantics, lowest latency
+  inputDC = rtcPC.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
 
   rtcPC.addTransceiver("video", { direction: "recvonly" });
 
@@ -299,6 +304,15 @@ socket.on("webrtc_ice_candidate", (d) => {
 });
 
 const LOGGER = { log: console.log.bind(console), error: console.error.bind(console) };
+
+// Route input events over WebRTC DataChannel (UDP, unordered) when available, else Socket.IO
+function emitInput(type, data) {
+  if (inputDC && inputDC.readyState === "open") {
+    inputDC.send(JSON.stringify({ t: type, ...data }));
+  } else {
+    socket.emit(type, data);
+  }
+}
 
 // ===== Cursor =====
 function drawRemoteCursor() {
@@ -411,7 +425,7 @@ function canvasCoords(cx, cy) {
   return { x: Math.max(0, Math.min(1, (cx - r.left) / r.width)), y: Math.max(0, Math.min(1, (cy - r.top) / r.height)) };
 }
 function throttle(fn, ms) { let l = 0; return (...a) => { const n = Date.now(); if (n - l >= ms) { l = n; fn(...a); } }; }
-const emitMove = throttle((c) => socket.emit("move", c), 15);
+const emitMove = throttle((c) => emitInput("move", c), 8);
 
 // ===== Sticky modifiers =====
 function getActiveMods() {
@@ -438,10 +452,10 @@ function sendKeyWithMods(key) {
   if (viewOnly) return;
   const m = getActiveMods();
   if (m.length > 0) {
-    socket.emit("hotkey", { modifiers: m, key });
+    emitInput("hotkey", { modifiers: m, key });
     releaseMods();
   } else {
-    socket.emit("keydown", { key, ctrl: false, alt: false, shift: false, meta: false });
+    emitInput("keydown", { key, ctrl: false, alt: false, shift: false, meta: false });
   }
 }
 
@@ -474,7 +488,7 @@ document.querySelectorAll(".vk-key[data-hk]").forEach(btn => {
     if (viewOnly) return;
     const parts = btn.dataset.hk.split("+");
     const key = parts.pop();
-    socket.emit("hotkey", { modifiers: parts, key });
+    emitInput("hotkey", { modifiers: parts, key });
   }
   btn.addEventListener("click", fire);
   btn.addEventListener("touchend", (e) => { e.preventDefault(); e.stopPropagation(); fire(e); });
@@ -483,7 +497,7 @@ document.querySelectorAll(".vk-key[data-hk]").forEach(btn => {
 // Text input send
 $("vk-text-send").onclick = () => {
   const t = $("vk-text-input").value;
-  if (t) { socket.emit("type_text", { text: t }); $("vk-text-input").value = ""; showToast("Text sent"); }
+  if (t) { emitInput("type_text", { text: t }); $("vk-text-input").value = ""; showToast("Text sent"); }
 };
 $("vk-text-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); $("vk-text-send").click(); }
@@ -517,13 +531,13 @@ tpArea.addEventListener("touchstart", (e) => {
 
   if (!tpDragMode && (tpStartTime - tpLastTapTime) < TAP_TAP_WINDOW) {
     tpDragging = true;
-    socket.emit("mousedown", { x: cursorX, y: cursorY, btn: "left" });
+    emitInput("mousedown", { x: cursorX, y: cursorY, btn: "left" });
     tpArea.textContent = "Dragging (tap-hold)...";
   }
 
   if (tpDragMode && !tpDragging) {
     tpDragging = true;
-    socket.emit("mousedown", { x: cursorX, y: cursorY, btn: "left" });
+    emitInput("mousedown", { x: cursorX, y: cursorY, btn: "left" });
     tpArea.textContent = "Dragging...";
   }
 }, { passive: false });
@@ -535,7 +549,7 @@ tpArea.addEventListener("touchmove", (e) => {
   tpMoveCursor(t);
   tpLast = { x: t.clientX, y: t.clientY };
   if (tpDragging) {
-    socket.emit("drag", { x: cursorX, y: cursorY });
+    emitInput("drag", { x: cursorX, y: cursorY });
   } else {
     emitMove({ x: cursorX, y: cursorY });
   }
@@ -549,15 +563,15 @@ tpArea.addEventListener("touchend", (e) => {
   const dist = tpStart ? Math.hypot(t.clientX - tpStart.x, t.clientY - tpStart.y) : 999;
 
   if (tpDragging) {
-    socket.emit("mouseup", { x: cursorX, y: cursorY, btn: "left" });
+    emitInput("mouseup", { x: cursorX, y: cursorY, btn: "left" });
     tpDragging = false;
     tpArea.textContent = tpDragMode
       ? "Drag mode ON \u2014 touch to grab & drag"
       : "Drag to move cursor \u00b7 Tap to click";
-    if (elapsed < 250 && dist < 12 && !tpDragMode) socket.emit("dblclick", {x: cursorX, y: cursorY});
+    if (elapsed < 250 && dist < 12 && !tpDragMode) emitInput("dblclick", {x: cursorX, y: cursorY});
   } else if (elapsed < 250 && dist < 12) {
     tpLastTapTime = Date.now();
-    socket.emit("click", { x: cursorX, y: cursorY, btn: "left" });
+    emitInput("click", { x: cursorX, y: cursorY, btn: "left" });
   }
   tpLast = null;
 }, { passive: false });
@@ -570,7 +584,7 @@ tpArea.addEventListener("mousedown", (e) => {
   tpMouseLast = { x: e.clientX, y: e.clientY };
   if (tpDragMode && !tpDragging) {
     tpDragging = true;
-    socket.emit("mousedown", { x: cursorX, y: cursorY, btn: "left" });
+    emitInput("mousedown", { x: cursorX, y: cursorY, btn: "left" });
   }
 });
 tpArea.addEventListener("mousemove", (e) => {
@@ -580,7 +594,7 @@ tpArea.addEventListener("mousemove", (e) => {
   cursorY = Math.max(0, Math.min(1, cursorY + (e.clientY - tpMouseLast.y) / r.height * cursorSens));
   tpMouseLast = { x: e.clientX, y: e.clientY };
   if (tpDragging) {
-    socket.emit("drag", { x: cursorX, y: cursorY });
+    emitInput("drag", { x: cursorX, y: cursorY });
   } else {
     emitMove({ x: cursorX, y: cursorY });
   }
@@ -588,14 +602,14 @@ tpArea.addEventListener("mousemove", (e) => {
 tpArea.addEventListener("mouseup", () => {
   tpMouseDown = false; tpMouseLast = null;
   if (tpDragging) {
-    socket.emit("mouseup", { x: cursorX, y: cursorY, btn: "left" });
+    emitInput("mouseup", { x: cursorX, y: cursorY, btn: "left" });
     tpDragging = false;
   }
 });
 
-$("tp-left").onclick = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "left" }); };
-$("tp-right").onclick = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "right" }); };
-$("tp-dbl").onclick = () => { if (viewOnly) return; socket.emit("dblclick", { x: cursorX, y: cursorY }); };
+$("tp-left").onclick = () => { if (viewOnly) return; emitInput("click", { x: cursorX, y: cursorY, btn: "left" }); };
+$("tp-right").onclick = () => { if (viewOnly) return; emitInput("click", { x: cursorX, y: cursorY, btn: "right" }); };
+$("tp-dbl").onclick = () => { if (viewOnly) return; emitInput("dblclick", { x: cursorX, y: cursorY }); };
 $("tp-drag").onclick = () => {
   if (viewOnly) return;
   tpDragMode = !tpDragMode;
@@ -605,34 +619,34 @@ $("tp-drag").onclick = () => {
     : "Drag to move cursor \u00b7 Tap to click";
   showToast(tpDragMode ? "Drag mode ON: touch pad to grab & drag" : "Drag mode OFF");
 };
-$("tp-sup").onclick = () => { if (viewOnly) return; socket.emit("scroll", { dy: 5 }); };
-$("tp-sdn").onclick = () => { if (viewOnly) return; socket.emit("scroll", { dy: -5 }); };
+$("tp-sup").onclick = () => { if (viewOnly) return; emitInput("scroll", { dy: 5 }); };
+$("tp-sdn").onclick = () => { if (viewOnly) return; emitInput("scroll", { dy: -5 }); };
 
 ["tp-left","tp-right","tp-dbl","tp-drag","tp-sup","tp-sdn"].forEach(id => {
   $(id).addEventListener("touchstart", (e) => { e.preventDefault(); $(id).click(); }, { passive: false });
 });
 
 // ===== Bottom Action Bar =====
-$("bb-lclick").onclick  = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "left" }); };
-$("bb-rclick").onclick  = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "right" }); };
-$("bb-dblclick").onclick= () => { if (viewOnly) return; socket.emit("dblclick", { x: cursorX, y: cursorY }); };
-$("bb-sup").onclick     = () => { if (viewOnly) return; socket.emit("scroll", { dy: 5 }); };
-$("bb-sdn").onclick     = () => { if (viewOnly) return; socket.emit("scroll", { dy: -5 }); };
-$("bb-left").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowLeft", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-down").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowDown", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-up").onclick      = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowUp", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-right").onclick   = () => { if (viewOnly) return; socket.emit("keydown", { key: "ArrowRight", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-esc").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "Escape", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-tab").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "Tab", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-enter").onclick   = () => { if (viewOnly) return; socket.emit("keydown", { key: "Enter", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-bksp").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "Backspace", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-space").onclick   = () => { if (viewOnly) return; socket.emit("keydown", { key: " ", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-del").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "Delete", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-home").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "Home", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-end").onclick     = () => { if (viewOnly) return; socket.emit("keydown", { key: "End", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-pgup").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "PageUp", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-pgdn").onclick    = () => { if (viewOnly) return; socket.emit("keydown", { key: "PageDown", ctrl: false, shift: false, alt: false, meta: false }); };
-$("bb-mclick").onclick  = () => { if (viewOnly) return; socket.emit("click", { x: cursorX, y: cursorY, btn: "middle" }); };
+$("bb-lclick").onclick  = () => { if (viewOnly) return; emitInput("click", { x: cursorX, y: cursorY, btn: "left" }); };
+$("bb-rclick").onclick  = () => { if (viewOnly) return; emitInput("click", { x: cursorX, y: cursorY, btn: "right" }); };
+$("bb-dblclick").onclick= () => { if (viewOnly) return; emitInput("dblclick", { x: cursorX, y: cursorY }); };
+$("bb-sup").onclick     = () => { if (viewOnly) return; emitInput("scroll", { dy: 5 }); };
+$("bb-sdn").onclick     = () => { if (viewOnly) return; emitInput("scroll", { dy: -5 }); };
+$("bb-left").onclick    = () => { if (viewOnly) return; emitInput("keydown", { key: "ArrowLeft", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-down").onclick    = () => { if (viewOnly) return; emitInput("keydown", { key: "ArrowDown", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-up").onclick      = () => { if (viewOnly) return; emitInput("keydown", { key: "ArrowUp", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-right").onclick   = () => { if (viewOnly) return; emitInput("keydown", { key: "ArrowRight", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-esc").onclick     = () => { if (viewOnly) return; emitInput("keydown", { key: "Escape", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-tab").onclick     = () => { if (viewOnly) return; emitInput("keydown", { key: "Tab", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-enter").onclick   = () => { if (viewOnly) return; emitInput("keydown", { key: "Enter", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-bksp").onclick    = () => { if (viewOnly) return; emitInput("keydown", { key: "Backspace", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-space").onclick   = () => { if (viewOnly) return; emitInput("keydown", { key: " ", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-del").onclick     = () => { if (viewOnly) return; emitInput("keydown", { key: "Delete", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-home").onclick    = () => { if (viewOnly) return; emitInput("keydown", { key: "Home", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-end").onclick     = () => { if (viewOnly) return; emitInput("keydown", { key: "End", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-pgup").onclick    = () => { if (viewOnly) return; emitInput("keydown", { key: "PageUp", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-pgdn").onclick    = () => { if (viewOnly) return; emitInput("keydown", { key: "PageDown", ctrl: false, shift: false, alt: false, meta: false }); };
+$("bb-mclick").onclick  = () => { if (viewOnly) return; emitInput("click", { x: cursorX, y: cursorY, btn: "middle" }); };
 
 // Text push — type text at remote cursor position
 $("bb-text-push").onclick = () => {
@@ -640,7 +654,7 @@ $("bb-text-push").onclick = () => {
   const inp = $("bb-text-input");
   const txt = inp.value;
   if (!txt) return;
-  socket.emit("type_text", { text: txt });
+  emitInput("type_text", { text: txt });
   inp.value = "";
   showToast("Text pushed");
   setTimeout(() => canvas.focus(), 50);
@@ -712,7 +726,7 @@ async function syncClipboardAndPaste() {
       await new Promise(r => setTimeout(r, 50));
     }
   } catch {}
-  socket.emit("hotkey", { modifiers: ["cmd"], key: "v" });
+  emitInput("hotkey", { modifiers: ["cmd"], key: "v" });
 }
 $("clip-get").onclick = () => { socket.emit("clipboard_get"); showToast("Fetching PC clipboard..."); };
 $("clip-set").onclick = () => { socket.emit("clipboard_set", { text: $("clip-text").value }); showToast("PC clipboard set"); };
@@ -720,7 +734,7 @@ $("clip-paste").onclick = () => {
   const text = $("clip-text").value;
   if (!text) { showToast("Text area is empty — paste your phone text first"); return; }
   socket.emit("clipboard_set", { text });
-  setTimeout(() => socket.emit("hotkey", { modifiers: ["cmd"], key: "v" }), 150);
+  setTimeout(() => emitInput("hotkey", { modifiers: ["cmd"], key: "v" }), 150);
   showToast("Pasting on PC...");
 };
 $("clip-read-phone").onclick = async () => {
@@ -791,18 +805,18 @@ canvas.addEventListener("mousemove", (e) => {
   if (viewOnly) return;
   const c = useWebRTC ? canvasCoordsFromVideo(e.clientX, e.clientY) : canvasCoords(e.clientX, e.clientY);
   cursorX = c.x; cursorY = c.y;
-  isDragging ? socket.emit("drag", c) : emitMove(c);
+  isDragging ? emitInput("drag", c) : emitMove(c);
 });
 canvas.addEventListener("mousedown", (e) => {
   e.preventDefault(); canvas.focus();
   if (viewOnly) return;
   const coordFn = useWebRTC ? canvasCoordsFromVideo : canvasCoords;
   if (e.detail >= 3) {
-    socket.emit("tripleclick", coordFn(e.clientX, e.clientY));
+    emitInput("tripleclick", coordFn(e.clientX, e.clientY));
     return;
   }
   isDragging = true;
-  socket.emit("mousedown", { ...coordFn(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
+  emitInput("mousedown", { ...coordFn(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
 });
 canvas.addEventListener("mouseup", (e) => {
   e.preventDefault();
@@ -810,20 +824,20 @@ canvas.addEventListener("mouseup", (e) => {
   if (e.detail >= 3) return;
   isDragging = false;
   const coordFn = useWebRTC ? canvasCoordsFromVideo : canvasCoords;
-  socket.emit("mouseup", { ...coordFn(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
+  emitInput("mouseup", { ...coordFn(e.clientX, e.clientY), btn: e.button === 2 ? "right" : "left" });
 });
 canvas.addEventListener("click", (e) => e.preventDefault());
 canvas.addEventListener("dblclick", (e) => {
   e.preventDefault();
   if (viewOnly) return;
   const coordFn = useWebRTC ? canvasCoordsFromVideo : canvasCoords;
-  socket.emit("dblclick", coordFn(e.clientX, e.clientY));
+  emitInput("dblclick", coordFn(e.clientX, e.clientY));
 });
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 canvasWrap.addEventListener("wheel", (e) => {
   if (e.ctrlKey || e.metaKey) { e.preventDefault(); setZoom(zoomLevel + (e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP)); }
-  else if (zoomLevel <= 1.01 && !viewOnly) { e.preventDefault(); socket.emit("scroll", { dy: e.deltaY > 0 ? -3 : 3 }); }
+  else if (zoomLevel <= 1.01 && !viewOnly) { e.preventDefault(); emitInput("scroll", { dy: e.deltaY > 0 ? -3 : 3 }); }
 }, { passive: false });
 
 // ===== Touch on canvas =====
@@ -853,7 +867,7 @@ canvas.addEventListener("touchstart", (e) => {
     cursorX = c.x; cursorY = c.y;
     if (tStartTime - lastCanvasTapTime < 350) {
       canvasDragging = true;
-      socket.emit("mousedown", {...c, btn: "left"});
+      emitInput("mousedown", {...c, btn: "left"});
     } else {
       emitMove(c);
     }
@@ -877,7 +891,7 @@ canvas.addEventListener("touchmove", (e) => {
         canvasWrap.scrollTop -= dy;
       } else {
         if (Math.abs(dy) > 3) {
-          socket.emit("scroll", { dy: dy > 0 ? -1 : 1 });
+          emitInput("scroll", { dy: dy > 0 ? -1 : 1 });
         }
       }
     }
@@ -889,7 +903,7 @@ canvas.addEventListener("touchmove", (e) => {
   const t = e.touches[0];
   if (interactionMode === "direct") {
     const c = canvasCoords(t.clientX, t.clientY); cursorX = c.x; cursorY = c.y;
-    if (canvasDragging) socket.emit("drag", c); else emitMove(c);
+    if (canvasDragging) emitInput("drag", c); else emitMove(c);
   }
   else if (trackpadLP) {
     const r = canvas.getBoundingClientRect();
@@ -910,12 +924,12 @@ canvas.addEventListener("touchend", (e) => {
   const c = interactionMode === "direct" ? canvasCoords(t.clientX, t.clientY) : {x:cursorX,y:cursorY};
 
   if (interactionMode === "direct" && canvasDragging) {
-    socket.emit("mouseup", {...c, btn:"left"});
+    emitInput("mouseup", {...c, btn:"left"});
     canvasDragging = false;
-    if (elapsed < 250 && dist < 15) socket.emit("dblclick", c);
+    if (elapsed < 250 && dist < 15) emitInput("dblclick", c);
   } else if (elapsed < 300 && dist < 15) {
     lastCanvasTapTime = Date.now();
-    socket.emit("click", {...c, btn:"left"});
+    emitInput("click", {...c, btn:"left"});
   }
   trackpadLP = null;
 }, { passive: false });
@@ -964,14 +978,14 @@ function handleKeyDown(e) {
   const hadSticky = mods.ctrl || mods.alt || mods.cmd || mods.shift;
 
   if (allMods.length > 0) {
-    socket.emit("hotkey", { modifiers: allMods, key: e.key });
+    emitInput("hotkey", { modifiers: allMods, key: e.key });
     // Auto-sync clipboard after copy/cut
     if (allMods.includes("cmd") && ['c','C','x','X'].includes(e.key)) {
       setTimeout(() => socket.emit("clipboard_get"), 250);
     }
     if (hadSticky) releaseMods();
   } else {
-    socket.emit("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
+    emitInput("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
   }
 }
 canvas.addEventListener("keydown", handleKeyDown);
@@ -998,9 +1012,9 @@ $("kb-input").addEventListener("keydown", (e) => {
   const hadSticky = mods.ctrl || mods.alt || mods.cmd || mods.shift;
 
   if (allMods.length > 0) {
-    socket.emit("hotkey", { modifiers: allMods, key: e.key });
+    emitInput("hotkey", { modifiers: allMods, key: e.key });
   } else {
-    socket.emit("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
+    emitInput("keydown", { key: e.key, ctrl: false, shift: false, alt: false, meta: false });
   }
   if (hadSticky) releaseMods();
 });
@@ -1015,11 +1029,11 @@ $("kb-input").addEventListener("input", () => {
   const activeMods = getActiveMods();
   if (activeMods.length > 0) {
     const ch = v.charAt(v.length - 1);
-    socket.emit("hotkey", { modifiers: activeMods, key: ch });
+    emitInput("hotkey", { modifiers: activeMods, key: ch });
     releaseMods();
-    if (v.length > 1) socket.emit("type_text", { text: v.slice(0, -1) });
+    if (v.length > 1) emitInput("type_text", { text: v.slice(0, -1) });
   } else {
-    socket.emit("type_text", { text: v });
+    emitInput("type_text", { text: v });
   }
 });
 

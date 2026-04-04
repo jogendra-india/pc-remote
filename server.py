@@ -12,6 +12,7 @@ Linux:   pyautogui for mouse, systemd-inhibit for sleep prevention
 import atexit
 import base64
 import ctypes
+import json
 import ctypes.util
 import logging
 import os
@@ -210,7 +211,7 @@ clients_lock = threading.Lock()
 logical_width, logical_height = pyautogui.size()
 
 settings = {
-    "fps": 15,
+    "fps": 30,
     "quality": 70,
     "scale": 0.75,
     "format": "webp",
@@ -1095,53 +1096,60 @@ def _capture_monitor_frame(sct):
 
 _peer_connections: dict[str, "RTCPeerConnection"] = {}
 _webrtc_loop = None
-_capture_local = None
+_webrtc_clients: set[str] = set()
+_webrtc_clients_lock = threading.Lock()
+
+
+class _FrameBuffer:
+    """Thread-safe latest-frame buffer shared between WebRTC track and Socket.IO encoder.
+    Single screen capture feeds both transports — eliminates double-capture CPU cost."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self.pil_img = None
+        self.raw = None
+        self.cur_pos = None
+        self.seq = 0
+
+    def put(self, pil_img, raw, cur_pos):
+        with self._cv:
+            self.pil_img = pil_img
+            self.raw = raw
+            self.cur_pos = cur_pos
+            self.seq += 1
+            self._cv.notify_all()
+
+    def wait_next(self, after_seq, timeout=0.1):
+        """Block until a new frame arrives (seq > after_seq) or timeout elapses."""
+        with self._cv:
+            self._cv.wait_for(lambda: self.seq > after_seq, timeout=timeout)
+            return self.pil_img, self.raw, self.cur_pos, self.seq
+
+
+_frame_buffer = _FrameBuffer()
 
 if HAS_WEBRTC:
 
-    _capture_local = threading.local()
-
     class ScreenShareTrack(VideoStreamTrack):
+        """Reads frames from the shared _FrameBuffer — no independent screen capture."""
         kind = "video"
 
         def __init__(self):
             super().__init__()
-            self._last_capture = 0.0
-
-        def _capture_frame(self):
-            if not hasattr(_capture_local, "sct"):
-                _capture_local.sct = mss.mss()
-            try:
-                pil_img, _raw, _cur_pos = _capture_monitor_frame(_capture_local.sct)
-            except (IndexError, KeyError):
-                try:
-                    _capture_local.sct.close()
-                except Exception:
-                    pass
-                _capture_local.sct = mss.mss()
-                settings["monitor"] = min(1, len(_capture_local.sct.monitors) - 1) if _capture_local.sct.monitors else 0
-                pil_img, _raw, _cur_pos = _capture_monitor_frame(_capture_local.sct)
-            frame_np = np.array(pil_img)
-
-            scale = settings.get("scale", 1.0)
-            if abs(scale - 1.0) > 0.01:
-                new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
-                pil_img = pil_img.resize(new_size, Image.BILINEAR)
-                frame_np = np.array(pil_img)
-
-            return frame_np
+            self._last_seq = 0
 
         async def recv(self):
-            target_fps = min(settings.get("fps", 30), 60)
-            target_interval = 1.0 / target_fps
-            elapsed = time.time() - self._last_capture
-            if elapsed < target_interval:
-                await asyncio.sleep(target_interval - elapsed)
-
             pts, time_base = await self.next_timestamp()
-            frame_np = await asyncio.to_thread(self._capture_frame)
-            self._last_capture = time.time()
-
+            loop = asyncio.get_event_loop()
+            pil_img, _raw, _cur_pos, seq = await loop.run_in_executor(
+                None,
+                lambda: _frame_buffer.wait_next(self._last_seq, timeout=0.5),
+            )
+            self._last_seq = seq
+            if pil_img is None:
+                frame_np = np.zeros((logical_height, logical_width, 3), dtype=np.uint8)
+            else:
+                frame_np = np.array(pil_img)
             frame = VideoFrame.from_ndarray(frame_np, format="rgb24")
             frame.pts = pts
             frame.time_base = time_base
@@ -1205,28 +1213,38 @@ def capture_and_stream():
                 new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
                 pil_img = pil_img.resize(new_size, Image.BILINEAR)
 
-            buf = BytesIO()
-            fmt = settings.get("format", "webp")
-            if fmt == "png":
-                pil_img.save(buf, format="PNG", optimize=False)
-                mime = "image/png"
-            elif fmt == "webp":
-                pil_img.save(buf, format="WEBP", quality=settings["quality"], method=0)
-                mime = "image/webp"
-            else:
-                pil_img.save(buf, format="JPEG", quality=settings["quality"], optimize=False)
-                mime = "image/jpeg"
-            frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-            frame_payload = {
-                "img": frame_b64,
-                "w": frame_w,
-                "h": frame_h,
-                "fmt": mime,
-            }
-            if cur_pos is not None:
-                frame_payload["cx"] = cur_pos[0] / (frame_w or 1)
-                frame_payload["cy"] = cur_pos[1] / (frame_h or 1)
-            socketio.emit("frame", frame_payload)
+            # Push to shared buffer — WebRTC track reads from here (no separate capture)
+            _frame_buffer.put(pil_img, raw, cur_pos)
+
+            # Only encode + emit via Socket.IO for clients not yet on WebRTC
+            with clients_lock:
+                all_clients = set(connected_clients)
+            with _webrtc_clients_lock:
+                socketio_clients = all_clients - _webrtc_clients
+            if socketio_clients:
+                buf = BytesIO()
+                fmt = settings.get("format", "webp")
+                if fmt == "png":
+                    pil_img.save(buf, format="PNG", optimize=False)
+                    mime = "image/png"
+                elif fmt == "webp":
+                    pil_img.save(buf, format="WEBP", quality=settings["quality"], method=0)
+                    mime = "image/webp"
+                else:
+                    pil_img.save(buf, format="JPEG", quality=settings["quality"], optimize=False)
+                    mime = "image/jpeg"
+                frame_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                frame_payload = {
+                    "img": frame_b64,
+                    "w": frame_w,
+                    "h": frame_h,
+                    "fmt": mime,
+                }
+                if cur_pos is not None:
+                    frame_payload["cx"] = cur_pos[0] / (frame_w or 1)
+                    frame_payload["cy"] = cur_pos[1] / (frame_h or 1)
+                for sid in socketio_clients:
+                    socketio.emit("frame", frame_payload, to=sid)
             last_sent = time.monotonic()
         except (IndexError, KeyError):
             # Monitor config changed — recreate mss context and reset monitor
@@ -1402,6 +1420,8 @@ def on_disconnect():
                     asyncio.run_coroutine_threadsafe(pc.close(), _webrtc_loop)
             except Exception:
                 LOGGER.exception("Error closing WebRTC peer connection for %s", sid)
+        with _webrtc_clients_lock:
+            _webrtc_clients.discard(sid)
     LOGGER.info("Client disconnected: %s (total: %d)", sid, len(connected_clients))
 
 
@@ -1623,6 +1643,86 @@ def on_type_text(data):
         time.sleep(0.03)
 
 
+def _dispatch_input_event(event_type, data):
+    """Shared handler for mouse/keyboard events from Socket.IO and WebRTC DataChannel."""
+    try:
+        if event_type == "move":
+            x, y = _mouse_xy(data)
+            mouse.move(x, y)
+        elif event_type == "click":
+            x, y = _mouse_xy(data)
+            mouse.click(x, y, button=data.get("btn", "left"))
+        elif event_type == "dblclick":
+            x, y = _mouse_xy(data)
+            mouse.double_click(x, y)
+        elif event_type == "tripleclick":
+            x, y = _mouse_xy(data)
+            mouse.triple_click(x, y)
+        elif event_type == "mousedown":
+            x, y = _mouse_xy(data)
+            mouse.mouse_down(x, y, button=data.get("btn", "left"))
+        elif event_type == "mouseup":
+            x, y = _mouse_xy(data)
+            mouse.mouse_up(x, y, button=data.get("btn", "left"))
+        elif event_type == "drag":
+            x, y = _mouse_xy(data)
+            mouse.drag(x, y)
+        elif event_type == "scroll":
+            mouse.scroll(int(data.get("dy", 0)))
+        elif event_type == "keydown":
+            key = data.get("key", "")
+            if key in MODIFIER_KEYS:
+                return
+            modifiers = _map_modifier_flag(data)
+            mapped = KEY_MAP.get(key)
+            if mapped is None:
+                mapped = key.lower() if len(key) == 1 else None
+            if mapped:
+                _send_key_combo(modifiers, mapped)
+        elif event_type == "hotkey":
+            modifiers = data.get("modifiers", [])
+            key = data.get("key", "")
+            if IS_MACOS and modifiers == ["shift"] and len(key) == 1 and not key.isalpha():
+                try:
+                    _type_char_quartz(key)
+                    return
+                except Exception:
+                    pass
+            mapped_mods = [MOD_MAP[m] for m in modifiers if m in MOD_MAP]
+            mapped_key = KEY_MAP.get(key)
+            if mapped_key is None:
+                mapped_key = key.lower() if len(key) == 1 else None
+            if mapped_key:
+                _send_key_combo(mapped_mods, mapped_key)
+        elif event_type == "type_text":
+            text = data.get("text", "")
+            for ch in text:
+                if ch == "\n":
+                    pyautogui.press("enter", _pause=False)
+                    time.sleep(0.03)
+                    continue
+                if IS_MACOS:
+                    try:
+                        _type_char_quartz(ch)
+                    except Exception:
+                        pyautogui.press(ch.lower() if len(ch) == 1 else ch, _pause=False)
+                else:
+                    mapped = KEY_MAP.get(ch)
+                    if mapped is None and len(ch) == 1:
+                        mapped = ch.lower()
+                    if mapped:
+                        try:
+                            if ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?':
+                                pyautogui.hotkey("shift", mapped, _pause=False)
+                            else:
+                                pyautogui.press(mapped, _pause=False)
+                        except Exception:
+                            pass
+                time.sleep(0.03)
+    except Exception:
+        LOGGER.exception("Input dispatch error: type=%s", event_type)
+
+
 # ---------------------------------------------------------------------------
 # Socket.IO events — clipboard
 # ---------------------------------------------------------------------------
@@ -1709,8 +1809,36 @@ if HAS_WEBRTC:
                 @pc.on("connectionstatechange")
                 async def on_state_change():
                     LOGGER.info("WebRTC state [%s]: %s", sid, pc.connectionState)
-                    if pc.connectionState in ("failed", "closed"):
+                    if pc.connectionState == "connected":
+                        with _webrtc_clients_lock:
+                            _webrtc_clients.add(sid)
+                    elif pc.connectionState in ("failed", "closed", "disconnected"):
                         _peer_connections.pop(sid, None)
+                        with _webrtc_clients_lock:
+                            _webrtc_clients.discard(sid)
+
+                @pc.on("datachannel")
+                def on_datachannel(channel):
+                    LOGGER.info("DataChannel [%s] ready for %s", channel.label, sid)
+
+                    @channel.on("message")
+                    def on_message(message):
+                        try:
+                            data = json.loads(message)
+                            event_type = data.pop("t", None)
+                            if not event_type:
+                                return
+                            # type_text has per-char sleeps — run in a thread
+                            if event_type == "type_text":
+                                threading.Thread(
+                                    target=_dispatch_input_event,
+                                    args=(event_type, data),
+                                    daemon=True,
+                                ).start()
+                            else:
+                                _dispatch_input_event(event_type, data)
+                        except Exception:
+                            LOGGER.exception("DataChannel message error for %s", sid)
 
                 pc.addTrack(ScreenShareTrack())
 

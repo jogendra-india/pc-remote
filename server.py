@@ -1743,10 +1743,44 @@ if HAS_WEBRTC:
             from aiortc import RTCIceCandidate
             try:
                 candidate_str = data.get("candidate", "")
+                sdp_mid = data.get("sdpMid")
+                sdp_mline_index = data.get("sdpMLineIndex")
                 if not candidate_str:
                     return
-                # aiortc handles ICE candidates via addIceCandidate internally
-                # through the SDP exchange; explicit ICE is optional
+                # Strip "candidate:" prefix browsers include
+                raw = candidate_str[len("candidate:"):] if candidate_str.startswith("candidate:") else candidate_str
+                parts = raw.split()
+                # SDP candidate format:
+                # foundation component protocol priority ip port typ type [raddr ip] [rport port] ...
+                foundation = parts[0]
+                component = int(parts[1])
+                protocol = parts[2].lower()
+                priority = int(parts[3])
+                ip = parts[4]
+                port = int(parts[5])
+                candidate_type = parts[7]  # parts[6] == "typ"
+                related_address = None
+                related_port = None
+                for i in range(8, len(parts) - 1, 2):
+                    if parts[i] == "raddr":
+                        related_address = parts[i + 1]
+                    elif parts[i] == "rport":
+                        related_port = int(parts[i + 1])
+                rtc_candidate = RTCIceCandidate(
+                    component=component,
+                    foundation=foundation,
+                    ip=ip,
+                    port=port,
+                    priority=priority,
+                    protocol=protocol,
+                    type=candidate_type,
+                    relatedAddress=related_address,
+                    relatedPort=related_port,
+                    sdpMid=sdp_mid,
+                    sdpMLineIndex=sdp_mline_index,
+                )
+                await pc.addIceCandidate(rtc_candidate)
+                LOGGER.debug("Added ICE candidate from client [%s]: %s:%s", sid, ip, port)
             except Exception:
                 LOGGER.exception("ICE candidate error")
 

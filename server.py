@@ -1803,7 +1803,11 @@ if HAS_WEBRTC:
                     old_pc = _peer_connections.pop(sid)
                     await old_pc.close()
 
-                pc = RTCPeerConnection()
+                from aiortc import RTCConfiguration, RTCIceServer
+                ice_config = RTCConfiguration(iceServers=[
+                    RTCIceServer(urls=["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]),
+                ])
+                pc = RTCPeerConnection(configuration=ice_config)
                 _peer_connections[sid] = pc
 
                 @pc.on("connectionstatechange")
@@ -1827,6 +1831,9 @@ if HAS_WEBRTC:
                             data = json.loads(message)
                             event_type = data.pop("t", None)
                             if not event_type:
+                                return
+                            if event_type == "dc_ping":
+                                channel.send(json.dumps({"t": "dc_pong", "ts": data.get("ts", 0)}))
                                 return
                             # type_text has per-char sleeps — run in a thread
                             if event_type == "type_text":

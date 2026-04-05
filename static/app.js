@@ -231,6 +231,16 @@ function startWebRTC() {
 
   // Input DataChannel: unordered + no retransmits = UDP semantics, lowest latency
   inputDC = rtcPC.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
+  inputDC.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.t === "dc_pong") {
+        latencyMs = performance.now() - msg.ts;
+        $("latency-display").textContent = Math.round(latencyMs) + "ms";
+        $("latency-display").style.color = latencyMs < 50 ? "var(--green)" : latencyMs < 150 ? "var(--orange)" : "var(--red)";
+      }
+    } catch {}
+  };
 
   rtcPC.addTransceiver("video", { direction: "recvonly" });
 
@@ -1188,9 +1198,14 @@ function loadAudioDevices() {
 // ===== Latency =====
 setInterval(() => {
   if (!isConnected) return;
-  socket.emit("ping_check", { t: Date.now() });
-}, 3000);
+  if (inputDC && inputDC.readyState === "open") {
+    inputDC.send(JSON.stringify({ t: "dc_ping", ts: performance.now() }));
+  } else {
+    socket.emit("ping_check", { t: Date.now() });
+  }
+}, 2000);
 socket.on("pong_check", (d) => {
+  if (inputDC && inputDC.readyState === "open") return;
   latencyMs = Date.now() - d.t;
   $("latency-display").textContent = latencyMs + "ms";
   $("latency-display").style.color = latencyMs < 50 ? "var(--green)" : latencyMs < 150 ? "var(--orange)" : "var(--red)";

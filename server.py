@@ -9,6 +9,9 @@ Windows: pyautogui for mouse, SetThreadExecutionState for sleep prevention
 Linux:   pyautogui for mouse, systemd-inhibit for sleep prevention
 """
 
+import faulthandler
+faulthandler.enable(all_threads=True)
+
 import atexit
 import base64
 import ctypes
@@ -26,6 +29,15 @@ import time
 import textwrap
 from io import BytesIO
 from pathlib import Path
+
+# XInitThreads() MUST be called before the very first X11 call (including the
+# XOpenDisplay() that pyautogui triggers at import time on Linux).  Placing it
+# here — before the third-party imports below — is the only safe position.
+if sys.platform.startswith("linux"):
+    try:
+        ctypes.cdll.LoadLibrary("libX11.so.6").XInitThreads()
+    except Exception:
+        pass
 
 import mss
 import pyautogui
@@ -814,9 +826,31 @@ else:  # Linux
             ]
 
         _x11_lib.XOpenDisplay.restype = ctypes.c_void_p
+        _x11_lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
         _x11_lib.XFree.argtypes = [ctypes.c_void_p]
+
+        # argtypes MUST be set so ctypes passes the Display* as a full 64-bit
+        # pointer, not the default c_int (32-bit) which truncates the address.
         _xfixes_lib.XFixesGetCursorImage.restype = ctypes.POINTER(_XFixesCursorImage)
+        _xfixes_lib.XFixesGetCursorImage.argtypes = [ctypes.c_void_p]
+
+        # XFixesQueryExtension must be called before any other XFixes call so
+        # that libXfixes registers the extension for this Display connection.
+        # Without it, XFixesGetCursorImage dereferences a NULL internal pointer
+        # and segfaults.
+        _xfixes_lib.XFixesQueryExtension.restype = ctypes.c_int
+        _xfixes_lib.XFixesQueryExtension.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+
         _x11_display = _x11_lib.XOpenDisplay(None)
+        if _x11_display:
+            _evb, _erb = ctypes.c_int(0), ctypes.c_int(0)
+            if not _xfixes_lib.XFixesQueryExtension(_x11_display, ctypes.byref(_evb), ctypes.byref(_erb)):
+                # XFixes not available on this X server — fall back to pyautogui
+                _xfixes_lib = None
     except OSError:
         pass
 
